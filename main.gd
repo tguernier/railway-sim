@@ -27,6 +27,7 @@ const TOWN_HIT_RADIUS := 35.0
 const WAYPOINT_RADIUS := 5.0
 
 func _ready() -> void:
+	RenderingServer.set_default_clear_color(Color.YELLOW_GREEN)
 	network = TrackNetwork.new()
 
 func _input(event: InputEvent) -> void:
@@ -106,16 +107,15 @@ func _start_simulation() -> void:
 	_dispatch_train(towns[0])
 
 func _dispatch_train(from_town: Town) -> void:
-	var best_town: Town = null
-	var best_waiting := -1.0
-	for town in towns:
-		if town != from_town and town.waiting > best_waiting:
-			best_waiting = town.waiting
-			best_town = town
-	if best_town == null:
-		train.route = []
-		return
-	var route := network.find_route(from_town, best_town)
+	var next_town = null
+	if network.get_outgoing(from_town).size() < 2:
+		# if train is at a terminus, switch direction
+		train.switch_direction()
+	if train.direction == train.Direction.FORWARD:
+		next_town = network.get_outgoing(from_town)[0].town_end
+	else:
+		next_town = network.get_outgoing(from_town)[-1].town_end
+	var route := network.find_route(from_town, next_town)
 	if route.size() > 0:
 		train.set_route(route)
 	else:
@@ -211,7 +211,9 @@ func _draw_train() -> void:
 	var train_pos := train.current_position()
 	var train_angle := train.current_angle()
 	draw_set_transform(train_pos, train_angle)
-	draw_rect(Rect2(-20, -7, 40, 14), Color.YELLOW)
+	draw_rect(Rect2(-20, -7, 40, 14), Color.DIM_GRAY)
+	draw_circle(Vector2(18, 0), 2.0, Color.YELLOW)
+	draw_circle(Vector2(-18, 0), 2.0, Color.RED)
 	draw_set_transform(Vector2.ZERO, 0)
 	draw_string(ThemeDB.fallback_font, train_pos + Vector2(-20, -15),
 		"%d" % train.passengers_on_board)

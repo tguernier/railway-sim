@@ -1,12 +1,15 @@
 class_name Train
 extends RefCounted
 
+enum Direction { FORWARD, BACKWARD }
+
 var route: Array = []
 var route_index: int = 0
 var segment_progress: float = 0.0
 var speed: float = 150.0
 var capacity: int = 40
 var passengers_on_board: int = 0
+var direction = Direction.FORWARD
 
 func set_route(new_route: Array) -> void:
 	route = new_route
@@ -75,3 +78,9 @@ func unload() -> int:
 
 func board_from(town: Town) -> void:
 	passengers_on_board = town.pickup_passengers(capacity)
+
+func switch_direction() -> void:
+	if direction == Direction.FORWARD:
+		direction = Direction.BACKWARD
+	else:
+		direction = Direction.FORWARD
