@@ -1,9 +1,11 @@
 63f7b34db8d8cdea90c76aacccf841ec
-::res://::1771116260
+::res://::1771120346
 icon.svg::CompressedTexture2D::6603637895581998617::1771112010::1771115304::1::::<><><>0<>0<>890cfb3e29049e7852fbce9be31fec9e<>res://.godot/imported/icon.svg-218a8f2b3041327d8a5756f3a245f83b.ctex::
 knowledge.md::TextFile::-1::1771115953::0::1::::<><><>0<>0<><>::
-main.gd::GDScript::1547223564608262581::1771116149::0::1::::<>Node2D<><>0<>0<><>::
+main.gd::GDScript::1547223564608262581::1771120254::0::1::::<>Node2D<><>0<>0<><>::
 node_2d.tscn::PackedScene::9035636568072306354::1771115173::0::1::::<><><>0<>0<><>::uid://wbqstihrcft2::::res://main.gd
 README.md::TextFile::-1::1771116078::0::1::::<><><>0<>0<><>::
-town.gd::GDScript::3952849017758097340::1771116138::0::1::::Town<>RefCounted<><>0<>0<><>::
-train.gd::GDScript::6707786495738016320::1771116142::0::1::::Train<>RefCounted<><>0<>0<><>::
+town.gd::GDScript::3952849017758097340::1771116670::0::1::::Town<>RefCounted<><>0<>0<><>::
+track_network.gd::GDScript::5687050280626119432::1771119049::0::1::::TrackNetwork<>RefCounted<><>0<>0<><>::
+track_segment.gd::GDScript::9220787299205341485::1771119043::0::1::::TrackSegment<>RefCounted<><>0<>0<><>::
+train.gd::GDScript::6707786495738016320::1771119134::0::1::::Train<>RefCounted<><>0<>0<><>::
