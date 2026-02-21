@@ -1,20 +1,26 @@
+## Graph of track segments connecting towns. Supports pathfinding via BFS.
 class_name TrackNetwork
 extends RefCounted
 
+## All track segments in the network.
 var segments: Array[TrackSegment] = []
+## Adjacency list mapping each town to its outgoing segments. Dictionary[Town, Array[TrackSegment]]
 var _outgoing: Dictionary = {}
 
+## Add a track segment to the network.
 func add_segment(segment: TrackSegment) -> void:
 	segments.append(segment)
 	if not _outgoing.has(segment.town_start):
 		_outgoing[segment.town_start] = []
 	_outgoing[segment.town_start].append(segment)
 
+## Get outgoing track segments from a town.
 func get_outgoing(town: Town) -> Array:
 	if _outgoing.has(town):
 		return _outgoing[town]
 	return []
 
+## Find a route between two towns.
 func find_route(from: Town, to: Town) -> Array:
 	var queue: Array = [[from, []]]
 	var visited: Dictionary = {from: true}

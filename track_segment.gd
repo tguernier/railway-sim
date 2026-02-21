@@ -1,17 +1,23 @@
+## A one-way track segment between two towns, represented as a smooth curve.
 class_name TrackSegment
 extends RefCounted
 
+## The town this segment originates from.
 var town_start: Town
+## The town this segment leads to.
 var town_end: Town
+## The Bézier curve describing the track path.
 var curve: Curve2D
 
-func _init(start: Town, end: Town, waypoints: Array = []) -> void:
+## Initialize a track segment with start and end towns, and optional waypoints.
+func _init(start: Town, end: Town, waypoints: Array[Vector2] = []) -> void:
 	town_start = start
 	town_end = end
 	curve = Curve2D.new()
 	_build_curve(waypoints)
 
-func _build_curve(waypoints: Array) -> void:
+## Build the curve for a track segment.
+func _build_curve(waypoints: Array[Vector2]) -> void:
 	var points: Array[Vector2] = []
 	points.append(town_start.position)
 	for wp in waypoints:
@@ -39,12 +45,15 @@ func _build_curve(waypoints: Array) -> void:
 
 		curve.add_point(points[i], handle_in, handle_out)
 
+## Get the length of a track segment.
 func length() -> float:
 	return curve.get_baked_length()
 
+## Get the position within the curve of point t, where t is between 0 and 1.
 func position_at(t: float) -> Vector2:
 	return curve.sample_baked(t * curve.get_baked_length())
 
+## Get the angle within the curve of point t, where t is between 0 and 1.
 func angle_at(t: float) -> float:
 	var total := curve.get_baked_length()
 	var offset := t * total
@@ -53,5 +62,6 @@ func angle_at(t: float) -> float:
 	var p2 := curve.sample_baked(minf(offset + epsilon, total))
 	return (p2 - p1).angle()
 
+## Get backed points along a track segment.
 func get_baked_points() -> PackedVector2Array:
 	return curve.get_baked_points()

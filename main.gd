@@ -1,35 +1,55 @@
+## Main game node. Manages game state, towns, tracks, trains, and rendering.
 extends Node2D
 
+## The two phases of the game: building the network, then watching it run.
 enum GameState { EDITING, SIMULATING }
 
+## Current game phase.
 var state := GameState.EDITING
+## All towns placed on the map.
 var towns: Array[Town] = []
+## The track network connecting towns.
 var network: TrackNetwork
+## The active train (created when simulation starts).
 var train: Train
+## Player's current money, earned by delivering passengers.
 var money := 1000.0
+## Frame counter used to throttle passenger generation.
 var frame_count := 0
 
+## Whether the player is currently drawing a track.
 var drawing_track := false
+## The town where the current track being drawn starts.
 var track_start_town: Town = null
+## Intermediate waypoints for the track currently being drawn.
 var track_waypoints: Array[Vector2] = []
+## The town currently under the mouse cursor, if any.
 var hovered_town: Town = null
+## Current mouse position in local coordinates.
 var mouse_pos := Vector2.ZERO
 
+## Rotating palette of colours assigned to new towns.
 var town_palette := [
 	Color.CORNFLOWER_BLUE, Color.INDIAN_RED, Color.SEA_GREEN,
 	Color.ORANGE, Color.MEDIUM_PURPLE, Color.CADET_BLUE,
 	Color.SALMON, Color.DARK_CYAN, Color.GOLDENROD,
 ]
+## Index into town_palette for the next town placed.
 var next_color_index := 0
 
+## Visual radius of a town circle.
 const TOWN_RADIUS := 30.0
+## Hit-test radius for clicking on a town.
 const TOWN_HIT_RADIUS := 35.0
+## Visual radius of a track waypoint dot.
 const WAYPOINT_RADIUS := 5.0
 
+## Runs when the node is ready
 func _ready() -> void:
 	RenderingServer.set_default_clear_color(Color.YELLOW_GREEN)
 	network = TrackNetwork.new()
 
+## Runs when there is an input event
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		mouse_pos = get_local_mouse_position()
@@ -40,6 +60,7 @@ func _input(event: InputEvent) -> void:
 	if state == GameState.EDITING:
 		_handle_edit_input(event)
 
+## Handles inputs, presently only for editing mode.
 func _handle_edit_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
@@ -75,18 +96,21 @@ func _handle_edit_input(event: InputEvent) -> void:
 				if drawing_track and track_waypoints.size() > 0:
 					track_waypoints.pop_back()
 
+## Returns the town at a screen position, if there is one.
 func _find_town_at(pos: Vector2) -> Town:
 	for town in towns:
 		if pos.distance_to(town.position) < TOWN_HIT_RADIUS:
 			return town
 	return null
 
+## Place a town at a screen position.
 func _place_town(pos: Vector2) -> void:
 	var col: Color = town_palette[next_color_index % town_palette.size()]
 	next_color_index += 1
 	var town := Town.new(pos, col)
 	towns.append(town)
 
+## Create a bidirectional track segment.
 func _create_bidirectional_track(from: Town, to: Town, waypoints: Array[Vector2]) -> void:
 	network.add_segment(TrackSegment.new(from, to, waypoints))
 	var reversed_wp: Array[Vector2] = []
@@ -94,11 +118,13 @@ func _create_bidirectional_track(from: Town, to: Town, waypoints: Array[Vector2]
 		reversed_wp.append(waypoints[i])
 	network.add_segment(TrackSegment.new(to, from, reversed_wp))
 
+## Reset the drawing state.
 func _reset_drawing() -> void:
 	drawing_track = false
 	track_start_town = null
 	track_waypoints = []
 
+## Start the simulation.
 func _start_simulation() -> void:
 	if towns.size() < 2 or network.segments.size() == 0:
 		return
@@ -106,6 +132,7 @@ func _start_simulation() -> void:
 	train = Train.new()
 	_dispatch_train(towns[0])
 
+## Dispatch a train from a town. Handles which town the train will go to next.
 func _dispatch_train(from_town: Town) -> void:
 	var next_town = null
 	if network.get_outgoing(from_town).size() < 2:
@@ -121,6 +148,7 @@ func _dispatch_train(from_town: Town) -> void:
 	else:
 		train.route = []
 
+## Handle 1 simulation tick.
 func _process(delta: float) -> void:
 	if state == GameState.SIMULATING:
 		if frame_count > 9:
@@ -140,6 +168,7 @@ func _process(delta: float) -> void:
 
 	queue_redraw()
 
+## Draw game scene.
 func _draw() -> void:
 	_draw_tracks()
 	_draw_towns()
@@ -150,6 +179,7 @@ func _draw() -> void:
 		_draw_train()
 		_draw_hud()
 
+## Draw tracks.
 func _draw_tracks() -> void:
 	var drawn: Dictionary = {}
 	for seg in network.segments:
@@ -159,6 +189,7 @@ func _draw_tracks() -> void:
 			draw_polyline(seg.get_baked_points(), Color.GRAY, 3.0)
 			drawn[key_a] = true
 
+## Draw towns.
 func _draw_towns() -> void:
 	for town in towns:
 		draw_circle(town.position, TOWN_RADIUS, town.color)
@@ -170,6 +201,7 @@ func _draw_towns() -> void:
 			draw_string(ThemeDB.fallback_font, town.position + Vector2(-30, -40),
 				"Waiting: %d" % int(town.waiting))
 
+## Draw editor overlay.
 func _draw_editor_overlay() -> void:
 	if drawing_track:
 		var preview_points: PackedVector2Array = []
@@ -190,6 +222,7 @@ func _draw_editor_overlay() -> void:
 			hint += " | SPACE to start simulation"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
 
+## Draw dashed line for track preview in editing mode.
 func _draw_dashed_line(points: PackedVector2Array, color: Color, width: float, dash_length: float) -> void:
 	for i in range(points.size() - 1):
 		var from := points[i]
@@ -207,6 +240,7 @@ func _draw_dashed_line(points: PackedVector2Array, color: Color, width: float, d
 			drawn += seg_len
 			drawing = not drawing
 
+## Draw train.
 func _draw_train() -> void:
 	var train_pos := train.current_position()
 	var train_angle := train.current_angle()
@@ -218,6 +252,7 @@ func _draw_train() -> void:
 	draw_string(ThemeDB.fallback_font, train_pos + Vector2(-20, -15),
 		"%d" % train.passengers_on_board)
 
+## Draw HUD.
 func _draw_hud() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20),
 		"Money: %d | On board: %d" % [money, train.passengers_on_board])

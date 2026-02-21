@@ -1,29 +1,44 @@
+## A train that follows a route of track segments, carrying passengers between towns.
 class_name Train
 extends RefCounted
 
+## Travel direction along the network (toggles at terminus stations).
 enum Direction { FORWARD, BACKWARD }
 
+## Ordered list of track segments forming the current route. Array[TrackSegment]
 var route: Array = []
+## Index of the segment the train is currently traversing.
 var route_index: int = 0
+## Progress along the current segment, from 0.0 (start) to 1.0 (end).
 var segment_progress: float = 0.0
+## Travel speed in pixels per second.
 var speed: float = 150.0
+## Maximum number of passengers the train can carry.
 var capacity: int = 40
+## Number of passengers currently aboard.
 var passengers_on_board: int = 0
+## Current travel direction.
 var direction = Direction.FORWARD
 
+## Initialise a route.
+##
+## new_route: Array[TrackSegment]
 func set_route(new_route: Array) -> void:
 	route = new_route
 	route_index = 0
 	segment_progress = 0.0
 
+## Check if the train has a route.
 func has_route() -> bool:
 	return route.size() > 0
 
+## Get current track segment.
 func current_segment() -> TrackSegment:
 	if route_index < route.size():
 		return route[route_index]
 	return null
 
+## Move train along a track segment
 func move(delta: float) -> void:
 	if not has_route():
 		return
@@ -51,34 +66,41 @@ func move(delta: float) -> void:
 			segment_progress += distance / seg.length()
 			distance = 0.0
 
+## Check if train has fully progressed along a track segment.
 func has_completed_route() -> bool:
 	return route.size() > 0 and route_index >= route.size() - 1 and segment_progress >= 1.0
 
+## Get current train position.
 func current_position() -> Vector2:
 	var seg := current_segment()
 	if seg == null:
 		return Vector2.ZERO
 	return seg.position_at(segment_progress)
 
+## Get current train angle.
 func current_angle() -> float:
 	var seg := current_segment()
 	if seg == null:
 		return 0.0
 	return seg.angle_at(segment_progress)
 
+## Get current train destination town.
 func destination_town() -> Town:
 	if route.size() > 0:
 		return route[route.size() - 1].town_end
 	return null
 
+## Unload passengers from train.
 func unload() -> int:
 	var fare := passengers_on_board
 	passengers_on_board = 0
 	return fare
 
+## Pickup passengers onto train.
 func board_from(town: Town) -> void:
 	passengers_on_board = town.pickup_passengers(capacity)
 
+## Switch train direction.
 func switch_direction() -> void:
 	if direction == Direction.FORWARD:
 		direction = Direction.BACKWARD
