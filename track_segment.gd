@@ -1,28 +1,34 @@
-## A one-way track segment between two towns, represented as a smooth curve.
+## A one-way track segment between two network nodes, represented as a smooth curve.
 class_name TrackSegment
 extends RefCounted
 
-## The town this segment originates from.
-var town_start: Town
-## The town this segment leads to.
-var town_end: Town
+## The node this segment originates from.
+var node_start: NetworkNode
+## The node this segment leads to.
+var node_end: NetworkNode
 ## The Bézier curve describing the track path.
 var curve: Curve2D
 
-## Initialize a track segment with start and end towns, and optional waypoints.
-func _init(start: Town, end: Town, waypoints: Array[Vector2] = []) -> void:
-	town_start = start
-	town_end = end
+## Convenience accessors for the town at each end (null if the node is a junction).
+var town_start: Town:
+	get: return node_start.town if node_start else null
+var town_end: Town:
+	get: return node_end.town if node_end else null
+
+## Initialize a track segment between two network nodes, with optional waypoints.
+func _init(start: NetworkNode, end: NetworkNode, waypoints: Array[Vector2] = []) -> void:
+	node_start = start
+	node_end = end
 	curve = Curve2D.new()
 	_build_curve(waypoints)
 
 ## Build the curve for a track segment.
 func _build_curve(waypoints: Array[Vector2]) -> void:
 	var points: Array[Vector2] = []
-	points.append(town_start.position)
+	points.append(node_start.position)
 	for wp in waypoints:
 		points.append(wp)
-	points.append(town_end.position)
+	points.append(node_end.position)
 
 	for i in range(points.size()):
 		var handle_in := Vector2.ZERO
@@ -62,6 +68,6 @@ func angle_at(t: float) -> float:
 	var p2 := curve.sample_baked(minf(offset + epsilon, total))
 	return (p2 - p1).angle()
 
-## Get backed points along a track segment.
+## Get baked points along a track segment.
 func get_baked_points() -> PackedVector2Array:
 	return curve.get_baked_points()

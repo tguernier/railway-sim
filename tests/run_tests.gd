@@ -4,6 +4,7 @@ extends SceneTree
 
 func _initialize() -> void:
 	var suites: Array = [
+		TestNetworkNode.new(),
 		TestTown.new(),
 		TestTrackSegment.new(),
 		TestTrackNetwork.new(),

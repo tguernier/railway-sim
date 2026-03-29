@@ -8,11 +8,14 @@ var position: Vector2
 var color: Color
 ## Number of passengers currently waiting at this town.
 var waiting: float = 0.0
+## The network node representing this town in the track graph.
+var node: NetworkNode
 
 ## Initialize a town with a position and color.
 func _init(pos: Vector2, col: Color) -> void:
 	position = pos
 	color = col
+	node = NetworkNode.from_town(self)
 
 ## Generate passengers at the town.
 func generate_passengers() -> void:

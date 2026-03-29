@@ -2,9 +2,6 @@
 class_name Train
 extends RefCounted
 
-## Travel direction along the network (toggles at terminus stations).
-enum Direction { FORWARD, BACKWARD }
-
 ## Ordered list of track segments forming the current route. Array[TrackSegment]
 var route: Array = []
 ## Index of the segment the train is currently traversing.
@@ -17,8 +14,11 @@ var speed: float = 150.0
 var capacity: int = 40
 ## Number of passengers currently aboard.
 var passengers_on_board: int = 0
-## Current travel direction.
-var direction = Direction.FORWARD
+
+## Ordered list of town stops the train visits in a loop. Array[Town]
+var orders: Array[Town] = []
+## Index into orders for the next stop the train is heading toward.
+var current_order_index: int = 0
 
 ## Initialise a route.
 ##
@@ -84,11 +84,23 @@ func current_angle() -> float:
 		return 0.0
 	return seg.angle_at(segment_progress)
 
-## Get current train destination town.
+## Get current train destination town (null if destination is a junction).
 func destination_town() -> Town:
 	if route.size() > 0:
-		return route[route.size() - 1].town_end
+		return route[route.size() - 1].node_end.town
 	return null
+
+## Get the town the train is currently heading toward per its orders.
+func current_order_town() -> Town:
+	if orders.size() == 0:
+		return null
+	return orders[current_order_index]
+
+## Advance to the next stop in the order list (wraps around).
+func advance_order() -> void:
+	if orders.size() == 0:
+		return
+	current_order_index = (current_order_index + 1) % orders.size()
 
 ## Unload passengers from train.
 func unload() -> int:
@@ -99,10 +111,3 @@ func unload() -> int:
 ## Pickup passengers onto train.
 func board_from(town: Town) -> void:
 	passengers_on_board = town.pickup_passengers(capacity)
-
-## Switch train direction.
-func switch_direction() -> void:
-	if direction == Direction.FORWARD:
-		direction = Direction.BACKWARD
-	else:
-		direction = Direction.FORWARD
