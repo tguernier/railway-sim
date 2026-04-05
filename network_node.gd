@@ -9,8 +9,11 @@ enum NodeType { TOWN, JUNCTION }
 var type: NodeType
 ## World position of this node.
 var position: Vector2
-## The town at this node, if type == TOWN.
-var town: Town
+## The town at this node, if type == TOWN. Stored as a weak reference to avoid cycles.
+var _town_ref: WeakRef = null
+var town: Town:
+	get: return _town_ref.get_ref() as Town if _town_ref != null else null
+	set(t): _town_ref = weakref(t) if t != null else null
 
 ## Create a town node.
 static func from_town(t: Town) -> NetworkNode:

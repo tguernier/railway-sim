@@ -8,6 +8,7 @@ func _initialize() -> void:
 		TestTown.new(),
 		TestTrackSegment.new(),
 		TestTrackNetwork.new(),
+		TestTrackEditor.new(),
 		TestTrain.new(),
 	]
 
