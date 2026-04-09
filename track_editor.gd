@@ -13,6 +13,16 @@ var waypoints: Array[Vector2] = []
 
 ## Hit-test distance for clicking on a track segment or junction.
 const HIT_RADIUS := 15.0
+## Minimum allowed radius of curvature for a track segment (in pixels).
+const MIN_CURVE_RADIUS := 80.0
+## Maximum allowed divergence angle (radians) between a new track and the nearest
+## existing track at a shared node (turnout angle). 15 degrees.
+const MAX_TURNOUT_ANGLE := deg_to_rad(15.0)
+
+## Set to true when the last finish attempt was rejected for being too tight.
+var last_finish_rejected := false
+## Rejection reason: "curve" or "turnout" (set when last_finish_rejected is true).
+var rejection_reason := ""
 
 func _init(net: TrackNetwork) -> void:
 	network = net
@@ -33,15 +43,79 @@ func undo_waypoint() -> void:
 		waypoints.pop_back()
 
 ## Finish drawing: create a bidirectional track to the target node and reset.
-func finish_at(node: NetworkNode) -> void:
+## Returns false if the curve or turnout angle is invalid (segment not created).
+func finish_at(node: NetworkNode) -> bool:
+	var reason := _validate_track(start_node, node, waypoints)
+	if reason != "":
+		last_finish_rejected = true
+		rejection_reason = reason
+		return false
+	last_finish_rejected = false
+	rejection_reason = ""
 	create_bidirectional_track(start_node, node, waypoints)
 	cancel()
+	return true
 
 ## Finish drawing to a node, then immediately start a new drawing from that node.
-func finish_and_continue(node: NetworkNode) -> void:
+## Returns false if the curve or turnout angle is invalid (segment not created).
+func finish_and_continue(node: NetworkNode) -> bool:
+	var reason := _validate_track(start_node, node, waypoints)
+	if reason != "":
+		last_finish_rejected = true
+		rejection_reason = reason
+		return false
+	last_finish_rejected = false
+	rejection_reason = ""
 	create_bidirectional_track(start_node, node, waypoints)
 	start_node = node
 	waypoints = []
+	return true
+
+## Validate a candidate track for curve radius and turnout angle.
+## Returns "" if valid, or a reason string ("curve" or "turnout") if invalid.
+func _validate_track(from: NetworkNode, to: NetworkNode, wps: Array[Vector2]) -> String:
+	var candidate := TrackSegment.new(from, to, wps)
+	if candidate.min_radius_of_curvature() < MIN_CURVE_RADIUS:
+		return "curve"
+	if not _validate_turnout_angle(from, candidate, true) or not _validate_turnout_angle(to, candidate, false):
+		return "turnout"
+	return ""
+
+## Check that a new segment's departure angle at a node doesn't diverge too much
+## from any existing track. `is_start` indicates whether the node is the segment's start.
+## Returns true if valid (no existing tracks, or divergence within limit).
+func _validate_turnout_angle(node: NetworkNode, seg: TrackSegment, is_start: bool) -> bool:
+	if not node.is_junction():
+		return true
+	var existing := network.departure_angles_at(node)
+	if existing.size() == 0:
+		return true
+	var new_angle: float
+	if is_start:
+		new_angle = seg.angle_at(0.0)
+	else:
+		# For the end node, the "departure" direction from that node along this segment
+		# is the reverse of the segment's arrival direction.
+		new_angle = seg.angle_at(1.0) + PI
+	var min_divergence := INF
+	for a in existing:
+		var diff := absf(angle_difference(a, new_angle))
+		# Also check the reverse direction (the bidirectional partner will depart at new_angle + PI)
+		var diff_rev := absf(angle_difference(a, new_angle + PI))
+		min_divergence = minf(min_divergence, minf(diff, diff_rev))
+	return min_divergence <= MAX_TURNOUT_ANGLE
+
+## Compute the smallest signed angle between two angles (range -PI to PI).
+static func angle_difference(a: float, b: float) -> float:
+	var d := fmod(b - a + PI, TAU)
+	if d < 0.0:
+		d += TAU
+	return d - PI
+
+## Build a preview segment for the current drawing state (used for preview coloring).
+func build_preview_segment(mouse: Vector2) -> TrackSegment:
+	var end_node := NetworkNode.junction(mouse)
+	return TrackSegment.new(start_node, end_node, waypoints)
 
 ## Cancel the current drawing.
 func cancel() -> void:

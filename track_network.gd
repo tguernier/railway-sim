@@ -53,6 +53,13 @@ func cleanup_orphan(node: NetworkNode) -> bool:
 		return true
 	return false
 
+## Get all departure angles (radians) of outgoing segments at a node.
+func departure_angles_at(node: NetworkNode) -> Array[float]:
+	var angles: Array[float] = []
+	for seg in get_outgoing(node):
+		angles.append(seg.angle_at(0.0))
+	return angles
+
 ## Find the shortest route between two nodes using Dijkstra (weighted by segment length).
 func find_route(from: NetworkNode, to: NetworkNode) -> Array:
 	if from == to:

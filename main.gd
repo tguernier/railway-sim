@@ -92,8 +92,10 @@ func _handle_edit_input(event: InputEvent) -> void:
 					else:
 						var track_hit := editor.find_track_at(click_pos)
 						if track_hit.size() > 0:
-							new_junction = editor.split_track_at_hit(track_hit)
-						else:
+							var hit_seg: TrackSegment = track_hit[0]
+							if hit_seg.node_start != editor.start_node and hit_seg.node_end != editor.start_node:
+								new_junction = editor.split_track_at_hit(track_hit)
+						if new_junction == null:
 							new_junction = NetworkNode.junction(click_pos)
 							network.add_node(new_junction)
 					if new_junction != null and new_junction != editor.start_node:
@@ -101,9 +103,13 @@ func _handle_edit_input(event: InputEvent) -> void:
 				elif town == null and junction == null:
 					var track_hit := editor.find_track_at(click_pos)
 					if track_hit.size() > 0:
-						var new_junction := editor.split_track_at_hit(track_hit)
-						if new_junction != null and new_junction != editor.start_node:
-							editor.finish_at(new_junction)
+						var hit_seg: TrackSegment = track_hit[0]
+						if hit_seg.node_start == editor.start_node or hit_seg.node_end == editor.start_node:
+							editor.add_waypoint(click_pos)
+						else:
+							var new_junction := editor.split_track_at_hit(track_hit)
+							if new_junction != null and new_junction != editor.start_node:
+								editor.finish_at(new_junction)
 					else:
 						editor.add_waypoint(click_pos)
 			else:
@@ -318,23 +324,69 @@ func _draw_editor_overlay() -> void:
 	if editing_orders:
 		_draw_order_overlay()
 	elif editor.drawing:
-		var preview_points: PackedVector2Array = []
-		preview_points.append(editor.start_node.position)
-		for wp in editor.waypoints:
-			preview_points.append(wp)
-		preview_points.append(mouse_pos)
-		_draw_dashed_line(preview_points, Color(1, 1, 1, 0.5), 2.0, 8.0)
+		_draw_curvature_preview()
 		for wp in editor.waypoints:
 			draw_circle(wp, WAYPOINT_RADIUS, Color.WHITE)
 		if hovered_town != null and hovered_town.node != editor.start_node:
 			draw_arc(hovered_town.position, TOWN_RADIUS + 4, 0, TAU, 32, Color.GREEN, 2.0)
-		draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-			"Click to add curve points | Click town/junction/track to finish | SHIFT+Click for junction chain | ESC to cancel | Z to undo")
+		_draw_turnout_angle_preview()
+		var hint_text := "Click to add curve points | Click town/junction/track to finish | SHIFT+Click for junction chain | ESC to cancel | Z to undo"
+		if editor.last_finish_rejected:
+			if editor.rejection_reason == "turnout":
+				hint_text = "TURNOUT ANGLE TOO STEEP — approach at a shallower angle | " + hint_text
+			else:
+				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
+		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
 		var hint := "SHIFT+CLICK to place towns | Click town/junction/track to draw | RIGHT-CLICK to delete | O to edit orders"
 		if train_orders.size() >= 2 and network.segments.size() > 0:
 			hint += " | SPACE to start simulation"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
+
+## Draw the track preview colored by curvature (green = OK, red = too tight).
+func _draw_curvature_preview() -> void:
+	var preview := editor.build_preview_segment(mouse_pos)
+	var points := preview.get_baked_points()
+	if points.size() < 3:
+		_draw_dashed_line(points, Color(1, 1, 1, 0.5), 2.0, 8.0)
+		return
+	var total := preview.length()
+	if total <= 0.0:
+		return
+	var step := maxf(total / 20.0, 2.0)
+	for i in range(points.size() - 1):
+		var mid_offset := 0.0
+		for j in range(i + 1):
+			if j > 0:
+				mid_offset += points[j].distance_to(points[j - 1])
+		var p0 := preview.curve.sample_baked(maxf(mid_offset - step, 0.0))
+		var p1 := points[i]
+		var p2 := preview.curve.sample_baked(minf(mid_offset + step, total))
+		var r := TrackSegment._circumradius(p0, p1, p2)
+		var color: Color
+		if r >= TrackEditor.MIN_CURVE_RADIUS:
+			color = Color(0.3, 1.0, 0.3, 0.7)
+		else:
+			color = Color(1.0, 0.2, 0.2, 0.7)
+		draw_line(points[i], points[i + 1], color, 3.0)
+
+## Draw turnout angle indicator at the start node if it has existing tracks.
+func _draw_turnout_angle_preview() -> void:
+	var existing := network.departure_angles_at(editor.start_node)
+	if existing.size() == 0:
+		return
+	var preview := editor.build_preview_segment(mouse_pos)
+	var new_angle := preview.angle_at(0.0)
+	var min_diff := INF
+	for a in existing:
+		var diff := absf(TrackEditor.angle_difference(a, new_angle))
+		var diff_rev := absf(TrackEditor.angle_difference(a, new_angle + PI))
+		min_diff = minf(min_diff, minf(diff, diff_rev))
+	var color := Color.GREEN if min_diff <= TrackEditor.MAX_TURNOUT_ANGLE else Color.RED
+	var label := "%d°" % int(rad_to_deg(min_diff))
+	draw_string(ThemeDB.fallback_font,
+		editor.start_node.position + Vector2(15, -15), label,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 14, color)
 
 ## Draw order editing overlay — hint text and route preview.
 func _draw_order_overlay() -> void:

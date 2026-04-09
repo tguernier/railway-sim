@@ -71,3 +71,36 @@ func angle_at(t: float) -> float:
 ## Get baked points along a track segment.
 func get_baked_points() -> PackedVector2Array:
 	return curve.get_baked_points()
+
+## Minimum radius of curvature along the segment, sampled at evenly-spaced points.
+## Uses the circumradius of three consecutive baked points to approximate curvature.
+## Returns INF for a straight line.
+func min_radius_of_curvature(samples: int = 20) -> float:
+	var total := curve.get_baked_length()
+	if total <= 0.0:
+		return INF
+	var min_r := INF
+	for i in range(samples):
+		var t := float(i) / float(samples - 1)
+		var offset := t * total
+		var step := maxf(total / float(samples), 2.0)
+		var p0 := curve.sample_baked(maxf(offset - step, 0.0))
+		var p1 := curve.sample_baked(offset)
+		var p2 := curve.sample_baked(minf(offset + step, total))
+		var r := _circumradius(p0, p1, p2)
+		if r < min_r:
+			min_r = r
+	return min_r
+
+## Compute the circumradius of a triangle defined by three points.
+## Returns INF if the points are collinear.
+static func _circumradius(p0: Vector2, p1: Vector2, p2: Vector2) -> float:
+	var a := p1 - p0
+	var b := p2 - p0
+	var cross := absf(a.x * b.y - a.y * b.x)
+	if cross < 1e-6:
+		return INF
+	var la := a.length()
+	var lb := b.length()
+	var lc := (p2 - p1).length()
+	return (la * lb * lc) / (2.0 * cross)
