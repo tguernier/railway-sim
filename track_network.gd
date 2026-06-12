@@ -4,12 +4,12 @@ extends RefCounted
 
 ## All track segments in the network.
 var segments: Array[TrackSegment] = []
-## All nodes (towns and junctions) in the network.
+## All junction nodes in the network.
 var nodes: Array[NetworkNode] = []
 ## Adjacency list mapping each node to its outgoing segments.
 var _outgoing: Dictionary = {}
 
-## Add a network node (town or junction).
+## Add a network node.
 func add_node(node: NetworkNode) -> void:
 	if not nodes.has(node):
 		nodes.append(node)
@@ -43,10 +43,8 @@ func get_incoming(node: NetworkNode) -> Array:
 			result.append(seg)
 	return result
 
-## Remove a junction node if it has no connections. Returns true if removed.
+## Remove a node if it has no connections. Returns true if removed.
 func cleanup_orphan(node: NetworkNode) -> bool:
-	if not node.is_junction():
-		return false
 	if get_outgoing(node).size() == 0 and get_incoming(node).size() == 0:
 		nodes.erase(node)
 		_outgoing.erase(node)
@@ -59,6 +57,36 @@ func departure_angles_at(node: NetworkNode) -> Array[float]:
 	for seg in get_outgoing(node):
 		angles.append(seg.angle_at(0.0))
 	return angles
+
+## Find the shortest route from a node to a station platform. The route always
+## ends with a traversal of the platform segment (entering at whichever end
+## gives the shorter path), so the train passes alongside the platform and
+## finishes at its far end.
+func find_route_to_platform(from: NetworkNode, platform: Platform) -> Array:
+	var entry := platform.segment.node_start
+	var exit := platform.segment.node_end
+	if from == entry:
+		return [platform.segment]
+	if from == exit:
+		return [platform.reverse_segment]
+	var route_a := find_route(from, entry)
+	var route_b := find_route(from, exit)
+	var len_a := _route_length(route_a) if route_a.size() > 0 else INF
+	var len_b := _route_length(route_b) if route_b.size() > 0 else INF
+	if is_inf(len_a) and is_inf(len_b):
+		return []
+	if len_a <= len_b:
+		route_a.append(platform.segment)
+		return route_a
+	route_b.append(platform.reverse_segment)
+	return route_b
+
+## Total length of a route (array of segments).
+func _route_length(route: Array) -> float:
+	var total := 0.0
+	for seg in route:
+		total += seg.length()
+	return total
 
 ## Find the shortest route between two nodes using Dijkstra (weighted by segment length).
 func find_route(from: NetworkNode, to: NetworkNode) -> Array:

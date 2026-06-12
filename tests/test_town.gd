@@ -4,6 +4,7 @@ extends TestBase
 func run_all() -> void:
 	print("[TestTown]")
 	_t("init", _test_init)
+	_t("town_has_no_network_node", _test_no_node)
 	_t("generate_passengers_increases_waiting", _test_generate_passengers)
 	_t("pickup_returns_floored_count", _test_pickup_returns_floored)
 	_t("pickup_limited_by_capacity", _test_pickup_capacity_limit)
@@ -16,6 +17,12 @@ func _test_init() -> void:
 	eq(t.position, pos)
 	eq(t.color, col)
 	eq(t.waiting, 0.0)
+	eq(t.station, null)
+	eq(t.radius, 60.0)
+
+func _test_no_node() -> void:
+	var t := Town.new(Vector2.ZERO, Color.WHITE)
+	is_false("node" in t)
 
 func _test_generate_passengers() -> void:
 	var t := Town.new(Vector2.ZERO, Color.WHITE)

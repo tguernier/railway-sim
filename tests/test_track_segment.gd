@@ -2,11 +2,8 @@ class_name TestTrackSegment
 extends TestBase
 
 # Helpers to keep tests concise.
-func _town(x: float, y: float) -> Town:
-	return Town.new(Vector2(x, y), Color.WHITE)
-
 func _node(x: float, y: float) -> NetworkNode:
-	return _town(x, y).node
+	return NetworkNode.junction(Vector2(x, y))
 
 func _seg(ax: float, ay: float, bx: float, by: float,
 		waypoints: Array[Vector2] = []) -> TrackSegment:
@@ -15,9 +12,10 @@ func _seg(ax: float, ay: float, bx: float, by: float,
 func run_all() -> void:
 	print("[TestTrackSegment]")
 	_t("stores_nodes", _test_stores_nodes)
-	_t("town_start_end_accessors", _test_town_accessors)
-	_t("junction_town_accessors_null", _test_junction_town_null)
+	_t("not_platform_segment_by_default", _test_not_platform_by_default)
+	_t("platform_marker", _test_platform_marker)
 	_t("length_positive", _test_length_positive)
+	_t("zero_length_segment_is_safe", _test_zero_length_safe)
 	_t("position_at_zero_is_start", _test_position_at_zero)
 	_t("position_at_one_is_end", _test_position_at_one)
 	_t("angle_horizontal_track", _test_angle_horizontal)
@@ -34,23 +32,32 @@ func _test_stores_nodes() -> void:
 	eq(seg.node_start, a)
 	eq(seg.node_end, b)
 
-func _test_town_accessors() -> void:
-	var ta := _town(0.0, 0.0)
-	var tb := _town(100.0, 0.0)
-	var seg := TrackSegment.new(ta.node, tb.node)
-	eq(seg.town_start, ta)
-	eq(seg.town_end, tb)
+func _test_not_platform_by_default() -> void:
+	var seg := _seg(0.0, 0.0, 200.0, 0.0)
+	is_false(seg.is_platform_segment())
+	eq(seg.platform, null)
 
-func _test_junction_town_null() -> void:
-	var j := NetworkNode.junction(Vector2(50, 50))
-	var t := _town(0, 0)
-	var seg := TrackSegment.new(t.node, j)
-	eq(seg.town_start, t)
-	eq(seg.town_end, null)
+func _test_platform_marker() -> void:
+	var fwd := _seg(0.0, 0.0, 200.0, 0.0)
+	var rev := _seg(200.0, 0.0, 0.0, 0.0)
+	var platform := Platform.new(fwd, rev, 1.0)
+	fwd.platform = platform
+	rev.platform = platform
+	is_true(fwd.is_platform_segment())
+	is_true(rev.is_platform_segment())
+	eq(fwd.platform, platform)
 
 func _test_length_positive() -> void:
 	var seg := _seg(0.0, 0.0, 100.0, 0.0)
 	gt(seg.length(), 0.0)
+
+func _test_zero_length_safe() -> void:
+	# Both endpoints at the same position (e.g. preview right after a
+	# shift+click chain) must not crash curve sampling.
+	var seg := _seg(100.0, 100.0, 100.0, 100.0)
+	eq(seg.length(), 0.0)
+	eq(seg.position_at(0.5), Vector2(100, 100))
+	eq(seg.angle_at(0.5), 0.0)
 
 func _test_position_at_zero() -> void:
 	var seg := _seg(0.0, 0.0, 300.0, 0.0)

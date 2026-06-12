@@ -1,14 +1,17 @@
 class_name TestTrackEditor
 extends TestBase
 
-func _town(x: float, y: float) -> Town:
-	return Town.new(Vector2(x, y), Color.WHITE)
-
 func _node(x: float, y: float) -> NetworkNode:
-	return _town(x, y).node
+	return NetworkNode.junction(Vector2(x, y))
 
 func _editor() -> TrackEditor:
 	return TrackEditor.new(TrackNetwork.new())
+
+## Build an editor with a straight bidirectional track from (0,0) to (300,0).
+func _editor_with_track() -> TrackEditor:
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(300, 0), [])
+	return ed
 
 func run_all() -> void:
 	print("[TestTrackEditor]")
@@ -17,6 +20,7 @@ func run_all() -> void:
 	_t("undo_waypoint", _test_undo_waypoint)
 	_t("undo_waypoint_empty_is_noop", _test_undo_empty)
 	_t("cancel_resets_state", _test_cancel)
+	_t("cancel_cleans_up_fresh_junction", _test_cancel_cleans_fresh_junction)
 	_t("finish_at_creates_bidirectional_and_resets", _test_finish_at)
 	_t("finish_and_continue_creates_track_and_continues", _test_finish_and_continue)
 	_t("create_bidirectional_track", _test_create_bidirectional)
@@ -27,13 +31,24 @@ func run_all() -> void:
 	_t("find_reverse_segment", _test_find_reverse)
 	_t("try_delete_track_at", _test_delete_track)
 	_t("split_track_at_hit", _test_split_track)
-	_t("remove_town_cleans_up", _test_remove_town)
 	_t("finish_rejects_tight_curve", _test_finish_rejects_tight)
 	_t("finish_accepts_gentle_curve", _test_finish_accepts_gentle)
 	_t("turnout_shallow_angle_accepted", _test_turnout_shallow)
 	_t("turnout_steep_angle_rejected", _test_turnout_steep)
 	_t("turnout_no_existing_tracks_accepted", _test_turnout_no_existing)
-	_t("turnout_skipped_for_towns", _test_turnout_town_exempt)
+	_t("finish_on_track_tangential_connects", _test_finish_on_track_connects)
+	_t("finish_on_track_steep_rejected_without_split", _test_finish_on_track_steep_no_split)
+	_t("finish_on_track_continue_keeps_drawing", _test_finish_on_track_continue)
+	_t("finish_on_track_platform_rejected", _test_finish_on_track_platform)
+	_t("place_station_creates_platform", _test_place_station)
+	_t("place_station_snaps_to_endpoint", _test_place_station_snaps)
+	_t("place_station_rejects_outside_town", _test_station_outside_town)
+	_t("place_station_rejects_second_station", _test_station_second_rejected)
+	_t("place_station_rejects_short_track", _test_station_short_track)
+	_t("place_station_rejects_platform_overlap", _test_station_overlap_rejected)
+	_t("split_rejected_on_platform", _test_split_rejected_on_platform)
+	_t("delete_rejected_on_platform", _test_delete_rejected_on_platform)
+	_t("remove_town_removes_station", _test_remove_town)
 
 func _test_start_drawing() -> void:
 	var ed := _editor()
@@ -72,6 +87,15 @@ func _test_cancel() -> void:
 	eq(ed.start_node, null)
 	eq(ed.waypoints.size(), 0)
 
+func _test_cancel_cleans_fresh_junction() -> void:
+	# A junction placed to start a free draw is removed again on cancel.
+	var ed := _editor()
+	var j := _node(10, 10)
+	ed.network.add_node(j)
+	ed.start_drawing(j)
+	ed.cancel()
+	is_false(ed.network.nodes.has(j))
+
 func _test_finish_at() -> void:
 	var ed := _editor()
 	var a := _node(0, 0)
@@ -105,39 +129,33 @@ func _test_create_bidirectional() -> void:
 
 func _test_find_junction_found() -> void:
 	var ed := _editor()
-	var j := NetworkNode.junction(Vector2(100, 100))
+	var j := _node(100, 100)
 	ed.network.add_node(j)
 	var found := ed.find_junction_at(Vector2(105, 100))
 	eq(found, j)
 
 func _test_find_junction_miss() -> void:
 	var ed := _editor()
-	var j := NetworkNode.junction(Vector2(100, 100))
+	var j := _node(100, 100)
 	ed.network.add_node(j)
 	var found := ed.find_junction_at(Vector2(200, 200))
 	eq(found, null)
 
 func _test_find_track_found() -> void:
 	var ed := _editor()
-	var a := _node(0, 0)
-	var b := _node(200, 0)
-	ed.create_bidirectional_track(a, b, [])
+	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	var hit := ed.find_track_at(Vector2(100, 5))
 	eq(hit.size(), 2)
 
 func _test_find_track_miss() -> void:
 	var ed := _editor()
-	var a := _node(0, 0)
-	var b := _node(200, 0)
-	ed.create_bidirectional_track(a, b, [])
+	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	var hit := ed.find_track_at(Vector2(100, 100))
 	eq(hit.size(), 0)
 
 func _test_find_reverse() -> void:
 	var ed := _editor()
-	var a := _node(0, 0)
-	var b := _node(200, 0)
-	ed.create_bidirectional_track(a, b, [])
+	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	var fwd := ed.network.segments[0]
 	var rev := ed.find_reverse_segment(fwd)
 	eq(rev.node_start, fwd.node_end)
@@ -145,21 +163,18 @@ func _test_find_reverse() -> void:
 
 func _test_delete_track() -> void:
 	var ed := _editor()
-	var a := _node(0, 0)
-	var b := _node(200, 0)
-	ed.create_bidirectional_track(a, b, [])
+	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	eq(ed.network.segments.size(), 2)
 	ed.try_delete_track_at(Vector2(100, 0))
 	eq(ed.network.segments.size(), 0)
 
 func _test_split_track() -> void:
 	var ed := _editor()
-	var a := _node(0, 0)
-	var b := _node(200, 0)
-	ed.create_bidirectional_track(a, b, [])
+	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	var hit := ed.find_track_at(Vector2(100, 0))
 	var junction := ed.split_track_at_hit(hit)
-	is_true(junction.is_junction())
+	is_true(junction != null)
+	is_true(ed.network.nodes.has(junction))
 	# Original 2 segments replaced by 4 (2 halves x bidirectional)
 	eq(ed.network.segments.size(), 4)
 
@@ -187,31 +202,14 @@ func _test_finish_accepts_gentle() -> void:
 	is_false(ed.last_finish_rejected)
 	eq(ed.network.segments.size(), 2)  # bidirectional
 
-func _test_remove_town() -> void:
-	var ed := _editor()
-	var ta := _town(0, 0)
-	var tb := _town(200, 0)
-	var towns: Array[Town] = [ta, tb]
-	var orders: Array[Town] = [ta, tb]
-	ed.network.add_node(ta.node)
-	ed.network.add_node(tb.node)
-	ed.create_bidirectional_track(ta.node, tb.node, [])
-	ed.remove_town(ta, towns, orders)
-	eq(ed.network.segments.size(), 0)
-	is_false(towns.has(ta))
-	is_false(orders.has(ta))
-	is_true(towns.has(tb))
-
 func _test_turnout_shallow() -> void:
 	# Create a track A→B going right, then branch from A at ~10° — should be accepted
 	var ed := _editor()
-	var a := NetworkNode.junction(Vector2(0, 0))
-	var b := NetworkNode.junction(Vector2(300, 0))
-	ed.network.add_node(a)
-	ed.network.add_node(b)
+	var a := _node(0, 0)
+	var b := _node(300, 0)
 	ed.create_bidirectional_track(a, b, [])
 	# New track from A at a shallow angle (~10° above horizontal)
-	var c := NetworkNode.junction(Vector2(300, -53))  # atan(53/300) ≈ 10°
+	var c := _node(300, -53)  # atan(53/300) ≈ 10°
 	ed.network.add_node(c)
 	ed.start_drawing(a)
 	var ok := ed.finish_at(c)
@@ -223,13 +221,11 @@ func _test_turnout_shallow() -> void:
 func _test_turnout_steep() -> void:
 	# Create a track A→B going right, then branch from A at 45° — should be rejected
 	var ed := _editor()
-	var a := NetworkNode.junction(Vector2(0, 0))
-	var b := NetworkNode.junction(Vector2(300, 0))
-	ed.network.add_node(a)
-	ed.network.add_node(b)
+	var a := _node(0, 0)
+	var b := _node(300, 0)
 	ed.create_bidirectional_track(a, b, [])
 	# New track from A at 45° — way too steep
-	var c := NetworkNode.junction(Vector2(300, -300))  # atan(300/300) = 45°
+	var c := _node(300, -300)  # atan(300/300) = 45°
 	ed.network.add_node(c)
 	ed.start_drawing(a)
 	var ok := ed.finish_at(c)
@@ -241,8 +237,8 @@ func _test_turnout_steep() -> void:
 func _test_turnout_no_existing() -> void:
 	# First track from a node — no existing tracks, so any angle is fine
 	var ed := _editor()
-	var a := NetworkNode.junction(Vector2(0, 0))
-	var b := NetworkNode.junction(Vector2(100, 200))
+	var a := _node(0, 0)
+	var b := _node(100, 200)
 	ed.network.add_node(a)
 	ed.network.add_node(b)
 	ed.start_drawing(a)
@@ -250,18 +246,177 @@ func _test_turnout_no_existing() -> void:
 	is_true(ok)
 	eq(ed.network.segments.size(), 2)
 
-func _test_turnout_town_exempt() -> void:
-	# Towns skip turnout angle validation — steep angle at a town is fine
-	var ed := _editor()
-	var ta := _town(0, 0)
-	var tb := _town(300, 0)
-	ed.network.add_node(ta.node)
-	ed.network.add_node(tb.node)
-	ed.create_bidirectional_track(ta.node, tb.node, [])
-	# New track from town A at 45° — would fail at a junction, but towns are exempt
-	var tc := _town(300, -300)
-	ed.network.add_node(tc.node)
-	ed.start_drawing(ta.node)
-	var ok := ed.finish_at(tc.node)
+func _test_finish_on_track_connects() -> void:
+	# Approach the track in line with its tangent — split and connect.
+	var ed := _editor_with_track()
+	var c := _node(500, 0)
+	ed.network.add_node(c)
+	ed.start_drawing(c)
+	var hit := ed.find_track_at(Vector2(150, 0))
+	var ok := ed.finish_on_track(hit)
 	is_true(ok)
+	is_false(ed.drawing)
+	# 2 original split into 4, plus the new bidirectional pair
+	eq(ed.network.segments.size(), 6)
+
+func _test_finish_on_track_steep_no_split() -> void:
+	# A perpendicular approach is rejected BEFORE the track is split.
+	var ed := _editor_with_track()
+	var c := _node(150, 300)
+	ed.network.add_node(c)
+	ed.start_drawing(c)
+	var nodes_before := ed.network.nodes.size()
+	var hit := ed.find_track_at(Vector2(150, 0))
+	var ok := ed.finish_on_track(hit)
+	is_false(ok)
+	is_true(ed.last_finish_rejected)
+	eq(ed.rejection_reason, "turnout")
+	is_true(ed.drawing)  # still drawing
+	eq(ed.network.segments.size(), 2)  # track NOT split
+	eq(ed.network.nodes.size(), nodes_before)  # no junction crumb
+
+func _test_finish_on_track_continue() -> void:
+	var ed := _editor_with_track()
+	var c := _node(500, 0)
+	ed.network.add_node(c)
+	ed.start_drawing(c)
+	var hit := ed.find_track_at(Vector2(150, 0))
+	var ok := ed.finish_on_track(hit, true)
+	is_true(ok)
+	is_true(ed.drawing)  # chain continues from the new junction
+	approx(ed.start_node.position.x, 150.0, 5.0)
+	eq(ed.waypoints.size(), 0)
+	eq(ed.network.segments.size(), 6)
+
+func _test_finish_on_track_platform() -> void:
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 0), Color.WHITE)
+	var towns: Array[Town] = [town]
+	var station := ed.place_station(Vector2(150, 0), towns)
+	var platform: Platform = station.platforms[0]
+	var c := _node(500, 0)
+	ed.network.add_node(c)
+	ed.start_drawing(c)
+	var ok := ed.finish_on_track([platform.segment, 0.5])
+	is_false(ok)
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), 6)  # unchanged
+
+func _test_place_station() -> void:
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 0), Color.WHITE)
+	var towns: Array[Town] = [town]
+	var station := ed.place_station(Vector2(150, 5), towns)
+	is_true(station != null)
+	eq(town.station, station)
+	eq(station.town, town)
+	eq(station.platforms.size(), 1)
+	var platform: Platform = station.platforms[0]
+	is_true(platform.segment.is_platform_segment())
+	is_true(platform.reverse_segment.is_platform_segment())
+	eq(platform.station, station)
+	approx(platform.segment.length(), TrackEditor.PLATFORM_LENGTH, 15.0)
+	# Entry/exit junctions registered in the network
+	is_true(ed.network.nodes.has(platform.segment.node_start))
+	is_true(ed.network.nodes.has(platform.segment.node_end))
+	# approach pair + platform pair + exit pair
+	eq(ed.network.segments.size(), 6)
+
+func _test_place_station_snaps() -> void:
+	# Clicking near a segment end snaps the platform to the existing node
+	# instead of creating a stub segment.
+	var ed := _editor()
+	var a := _node(0, 0)
+	ed.create_bidirectional_track(a, _node(300, 0), [])
+	var town := Town.new(Vector2(40, 0), Color.WHITE)
+	var towns: Array[Town] = [town]
+	var station := ed.place_station(Vector2(40, 0), towns)
+	is_true(station != null)
+	eq(station.platforms[0].segment.node_start, a)
+	# platform pair + exit pair only — no approach stub
 	eq(ed.network.segments.size(), 4)
+
+func _test_station_outside_town() -> void:
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 300), Color.WHITE)  # far from the track
+	var towns: Array[Town] = [town]
+	var station := ed.place_station(Vector2(150, 0), towns)
+	eq(station, null)
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), 2)  # untouched
+
+func _test_station_second_rejected() -> void:
+	# Two parallel tracks inside one town — only one station allowed.
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(300, 0), [])
+	ed.create_bidirectional_track(_node(0, 40), _node(300, 40), [])
+	var town := Town.new(Vector2(150, 20), Color.WHITE)
+	var towns: Array[Town] = [town]
+	var first := ed.place_station(Vector2(150, 0), towns)
+	is_true(first != null)
+	var second := ed.place_station(Vector2(150, 40), towns)
+	eq(second, null)
+	is_true(ed.last_error != "")
+	eq(town.station, first)
+
+func _test_station_short_track() -> void:
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(120, 0), [])
+	var town := Town.new(Vector2(60, 0), Color.WHITE)
+	var towns: Array[Town] = [town]
+	var station := ed.place_station(Vector2(60, 0), towns)
+	eq(station, null)
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), 2)  # untouched
+
+func _test_station_overlap_rejected() -> void:
+	# Clicking on an existing platform segment is rejected.
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 0), Color.WHITE)
+	var other := Town.new(Vector2(160, 0), Color.WHITE)
+	var towns: Array[Town] = [town, other]
+	var first := ed.place_station(Vector2(150, 0), towns)
+	is_true(first != null)
+	var second := ed.place_station(Vector2(160, 0), towns)
+	eq(second, null)
+	is_true(ed.last_error != "")
+	eq(other.station, null)
+
+func _test_split_rejected_on_platform() -> void:
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 0), Color.WHITE)
+	var towns: Array[Town] = [town]
+	var station := ed.place_station(Vector2(150, 0), towns)
+	var platform: Platform = station.platforms[0]
+	var junction := ed.split_track_at_hit([platform.segment, 0.5])
+	eq(junction, null)
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), 6)  # unchanged
+
+func _test_delete_rejected_on_platform() -> void:
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 0), Color.WHITE)
+	var towns: Array[Town] = [town]
+	ed.place_station(Vector2(150, 0), towns)
+	eq(ed.network.segments.size(), 6)
+	ed.try_delete_track_at(Vector2(150, 0))  # platform centre
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), 6)  # unchanged
+
+func _test_remove_town() -> void:
+	var ed := _editor_with_track()
+	var town := Town.new(Vector2(150, 0), Color.WHITE)
+	var other := Town.new(Vector2(500, 500), Color.WHITE)
+	var towns: Array[Town] = [town, other]
+	var orders: Array[Town] = [town]
+	var station := ed.place_station(Vector2(150, 0), towns)
+	is_true(station != null)
+	ed.remove_town(town, towns, orders)
+	eq(town.station, null)
+	is_false(towns.has(town))
+	is_true(towns.has(other))
+	eq(orders.size(), 0)
+	# Platform pair removed, approach tracks remain
+	eq(ed.network.segments.size(), 4)
+	for seg in ed.network.segments:
+		is_false(seg.is_platform_segment())

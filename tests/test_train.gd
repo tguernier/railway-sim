@@ -5,7 +5,7 @@ func _town(x: float, y: float) -> Town:
 	return Town.new(Vector2(x, y), Color.WHITE)
 
 func _node(x: float, y: float) -> NetworkNode:
-	return _town(x, y).node
+	return NetworkNode.junction(Vector2(x, y))
 
 func _seg(a: NetworkNode, b: NetworkNode) -> TrackSegment:
 	return TrackSegment.new(a, b)
@@ -14,15 +14,19 @@ func run_all() -> void:
 	print("[TestTrain]")
 	_t("has_route_false_initially", _test_no_route)
 	_t("set_route_stores_and_resets", _test_set_route)
+	_t("set_route_resets_boarded_flag", _test_set_route_resets_boarded_flag)
 	_t("has_route_true_after_set", _test_has_route)
+	_t("halts_at_pending_stop_point", _test_halts_at_stop_point)
+	_t("resumes_past_stop_once_cleared", _test_resumes_past_stop)
+	_t("set_route_clears_stop_point", _test_set_route_clears_stop)
+	_t("dwell_blocks_movement_and_counts_down", _test_dwell_blocks_movement)
+	_t("moves_again_after_dwell_expires", _test_moves_after_dwell)
 	_t("move_advances_segment_progress", _test_move_advances)
 	_t("has_completed_route_false_at_start", _test_not_completed_at_start)
 	_t("has_completed_route_true_after_full_move", _test_completed_after_move)
 	_t("unload_returns_count_and_clears", _test_unload)
 	_t("board_from_picks_up_passengers", _test_board_from)
 	_t("board_from_respects_capacity", _test_board_capacity)
-	_t("destination_town", _test_destination_town)
-	_t("destination_town_null_for_junction", _test_destination_junction)
 	_t("orders_empty_initially", _test_orders_empty)
 	_t("current_order_town_returns_correct_stop", _test_current_order_town)
 	_t("advance_order_cycles", _test_advance_order_cycles)
@@ -39,10 +43,58 @@ func _test_set_route() -> void:
 	eq(tr.route_index, 0)
 	eq(tr.segment_progress, 0.0)
 
+func _test_set_route_resets_boarded_flag() -> void:
+	var tr := Train.new()
+	tr.boarded_this_leg = true
+	tr.set_route([_seg(_node(0, 0), _node(200, 0))])
+	is_false(tr.boarded_this_leg)
+
 func _test_has_route() -> void:
 	var tr := Train.new()
 	tr.set_route([_seg(_node(0, 0), _node(200, 0))])
 	is_true(tr.has_route())
+
+func _test_halts_at_stop_point() -> void:
+	var tr := Train.new()
+	tr.set_route([_seg(_node(0, 0), _node(500, 0))])
+	tr.stop_progress = 0.5
+	tr.move(100.0)  # far more than enough to cross the whole segment
+	eq(tr.segment_progress, 0.5)  # halted at the stop point
+	is_true(tr.at_pending_stop())
+	is_false(tr.has_completed_route())
+
+func _test_resumes_past_stop() -> void:
+	var tr := Train.new()
+	tr.set_route([_seg(_node(0, 0), _node(500, 0))])
+	tr.stop_progress = 0.5
+	tr.move(100.0)
+	tr.stop_progress = -1.0  # dwell finished — pull away
+	tr.move(100.0)
+	is_true(tr.has_completed_route())
+
+func _test_set_route_clears_stop() -> void:
+	var tr := Train.new()
+	tr.stop_progress = 0.5
+	tr.set_route([_seg(_node(0, 0), _node(500, 0))])
+	eq(tr.stop_progress, -1.0)
+
+func _test_dwell_blocks_movement() -> void:
+	var tr := Train.new()
+	tr.set_route([_seg(_node(0, 0), _node(500, 0))])
+	tr.dwell_remaining = 1.0
+	tr.move(0.4)
+	eq(tr.segment_progress, 0.0)  # stopped at the platform
+	approx(tr.dwell_remaining, 0.6, 0.01)
+
+func _test_moves_after_dwell() -> void:
+	var tr := Train.new()
+	tr.set_route([_seg(_node(0, 0), _node(500, 0))])
+	tr.dwell_remaining = 0.3
+	tr.move(0.5)  # consumes the rest of the dwell
+	eq(tr.dwell_remaining, 0.0)
+	eq(tr.segment_progress, 0.0)
+	tr.move(0.1)  # now the train moves again
+	gt(tr.segment_progress, 0.0)
 
 func _test_move_advances() -> void:
 	var tr := Train.new()
@@ -81,20 +133,6 @@ func _test_board_capacity() -> void:
 	var tr := Train.new()
 	tr.board_from(t)
 	eq(tr.passengers_on_board, tr.capacity)
-
-func _test_destination_town() -> void:
-	var tr := Train.new()
-	var dest := _town(300, 0)
-	var seg := TrackSegment.new(_node(0, 0), dest.node)
-	tr.set_route([seg])
-	eq(tr.destination_town(), dest)
-
-func _test_destination_junction() -> void:
-	var tr := Train.new()
-	var j := NetworkNode.junction(Vector2(300, 0))
-	var seg := TrackSegment.new(_node(0, 0), j)
-	tr.set_route([seg])
-	eq(tr.destination_town(), null)
 
 func _test_orders_empty() -> void:
 	var tr := Train.new()

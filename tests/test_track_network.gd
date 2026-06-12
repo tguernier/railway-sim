@@ -1,14 +1,22 @@
 class_name TestTrackNetwork
 extends TestBase
 
-func _town(x: float, y: float) -> Town:
-	return Town.new(Vector2(x, y), Color.WHITE)
-
 func _node(x: float, y: float) -> NetworkNode:
-	return _town(x, y).node
+	return NetworkNode.junction(Vector2(x, y))
 
 func _seg(a: NetworkNode, b: NetworkNode) -> TrackSegment:
 	return TrackSegment.new(a, b)
+
+## Build a platform pair between two nodes and register it on a network.
+func _platform(net: TrackNetwork, a: NetworkNode, b: NetworkNode) -> Platform:
+	var fwd := TrackSegment.new(a, b)
+	var rev := TrackSegment.new(b, a)
+	net.add_segment(fwd)
+	net.add_segment(rev)
+	var platform := Platform.new(fwd, rev, 1.0)
+	fwd.platform = platform
+	rev.platform = platform
+	return platform
 
 func run_all() -> void:
 	print("[TestTrackNetwork]")
@@ -24,8 +32,12 @@ func run_all() -> void:
 	_t("remove_segment", _test_remove_segment)
 	_t("remove_segment_nonexistent_is_noop", _test_remove_nonexistent)
 	_t("cleanup_orphan_junction", _test_cleanup_orphan)
-	_t("cleanup_orphan_skips_towns", _test_cleanup_skips_towns)
+	_t("cleanup_orphan_keeps_connected", _test_cleanup_keeps_connected)
 	_t("route_through_junction", _test_route_through_junction)
+	_t("route_to_platform_traverses_platform", _test_route_to_platform)
+	_t("route_to_platform_from_entry_node", _test_route_to_platform_from_entry)
+	_t("route_to_platform_from_exit_node", _test_route_to_platform_from_exit)
+	_t("route_to_platform_no_path", _test_route_to_platform_no_path)
 
 func _test_add_stored() -> void:
 	var net := TrackNetwork.new()
@@ -100,9 +112,9 @@ func _test_find_route_same_node() -> void:
 func _test_dijkstra_shorter_distance() -> void:
 	# A --[long detour]--> B vs A --> M --> B (shorter total distance)
 	var net := TrackNetwork.new()
-	var a := NetworkNode.junction(Vector2(0, 0))
-	var b := NetworkNode.junction(Vector2(0, 200))
-	var m := NetworkNode.junction(Vector2(0, 100))
+	var a := _node(0, 0)
+	var b := _node(0, 200)
+	var m := _node(0, 100)
 	# Direct: A->B with a massive detour waypoint making the curve very long
 	var detour_wp: Array[Vector2] = [Vector2(2000, 100)]
 	var long_direct := TrackSegment.new(a, b, detour_wp)
@@ -139,25 +151,26 @@ func _test_remove_nonexistent() -> void:
 
 func _test_cleanup_orphan() -> void:
 	var net := TrackNetwork.new()
-	var j := NetworkNode.junction(Vector2(50, 50))
+	var j := _node(50, 50)
 	net.add_node(j)
 	is_true(net.nodes.has(j))
 	var removed := net.cleanup_orphan(j)
 	is_true(removed)
 	is_false(net.nodes.has(j))
 
-func _test_cleanup_skips_towns() -> void:
+func _test_cleanup_keeps_connected() -> void:
 	var net := TrackNetwork.new()
-	var t := _town(0, 0)
-	net.add_node(t.node)
-	var removed := net.cleanup_orphan(t.node)
+	var a := _node(0, 0)
+	var b := _node(100, 0)
+	net.add_segment(_seg(a, b))
+	var removed := net.cleanup_orphan(a)
 	is_false(removed)
-	is_true(net.nodes.has(t.node))
+	is_true(net.nodes.has(a))
 
 func _test_route_through_junction() -> void:
 	var net := TrackNetwork.new()
 	var a := _node(0, 0)
-	var j := NetworkNode.junction(Vector2(100, 0))
+	var j := _node(100, 0)
 	var b := _node(200, 0)
 	var aj := TrackSegment.new(a, j)
 	var jb := TrackSegment.new(j, b)
@@ -167,3 +180,45 @@ func _test_route_through_junction() -> void:
 	eq(route.size(), 2)
 	eq(route[0], aj)
 	eq(route[1], jb)
+
+func _test_route_to_platform() -> void:
+	# a --- entry ===platform=== exit: route enters at the nearer end and
+	# always finishes having crossed the platform.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var entry := _node(100, 0)
+	var exit := _node(220, 0)
+	var approach := _seg(a, entry)
+	net.add_segment(approach)
+	net.add_segment(_seg(entry, a))
+	var platform := _platform(net, entry, exit)
+	var route := net.find_route_to_platform(a, platform)
+	eq(route.size(), 2)
+	eq(route[0], approach)
+	eq(route[1], platform.segment)
+
+func _test_route_to_platform_from_entry() -> void:
+	var net := TrackNetwork.new()
+	var entry := _node(0, 0)
+	var exit := _node(120, 0)
+	var platform := _platform(net, entry, exit)
+	var route := net.find_route_to_platform(entry, platform)
+	eq(route.size(), 1)
+	eq(route[0], platform.segment)
+
+func _test_route_to_platform_from_exit() -> void:
+	var net := TrackNetwork.new()
+	var entry := _node(0, 0)
+	var exit := _node(120, 0)
+	var platform := _platform(net, entry, exit)
+	var route := net.find_route_to_platform(exit, platform)
+	eq(route.size(), 1)
+	eq(route[0], platform.reverse_segment)
+
+func _test_route_to_platform_no_path() -> void:
+	var net := TrackNetwork.new()
+	var lonely := _node(-500, -500)
+	net.add_node(lonely)
+	var platform := _platform(net, _node(0, 0), _node(120, 0))
+	var route := net.find_route_to_platform(lonely, platform)
+	eq(route.size(), 0)

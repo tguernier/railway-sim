@@ -9,11 +9,16 @@ var node_end: NetworkNode
 ## The Bézier curve describing the track path.
 var curve: Curve2D
 
-## Convenience accessors for the town at each end (null if the node is a junction).
-var town_start: Town:
-	get: return node_start.town if node_start else null
-var town_end: Town:
-	get: return node_end.town if node_end else null
+## The platform occupying this segment, if any. Stored as a weak reference to
+## avoid cycles (the platform holds a strong reference to its segments).
+var _platform_ref: WeakRef = null
+var platform: Platform:
+	get: return _platform_ref.get_ref() as Platform if _platform_ref != null else null
+	set(p): _platform_ref = weakref(p) if p != null else null
+
+## Whether this segment is occupied by a station platform.
+func is_platform_segment() -> bool:
+	return platform != null
 
 ## Initialize a track segment between two network nodes, with optional waypoints.
 func _init(start: NetworkNode, end: NetworkNode, waypoints: Array[Vector2] = []) -> void:
@@ -57,11 +62,15 @@ func length() -> float:
 
 ## Get the position within the curve of point t, where t is between 0 and 1.
 func position_at(t: float) -> Vector2:
+	if curve.get_baked_length() <= 0.0:
+		return node_start.position
 	return curve.sample_baked(t * curve.get_baked_length())
 
 ## Get the angle within the curve of point t, where t is between 0 and 1.
 func angle_at(t: float) -> float:
 	var total := curve.get_baked_length()
+	if total <= 0.0:
+		return 0.0
 	var offset := t * total
 	var epsilon := 1.0
 	var p1 := curve.sample_baked(maxf(offset - epsilon, 0.0))

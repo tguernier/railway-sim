@@ -14,6 +14,15 @@ var speed: float = 150.0
 var capacity: int = 40
 ## Number of passengers currently aboard.
 var passengers_on_board: int = 0
+## Set to true after the station stop on the current route leg is done.
+var boarded_this_leg := false
+## How long the train waits at each station stop, in seconds.
+var dwell_time: float = 2.0
+## Seconds remaining of the current station stop (0 when moving).
+var dwell_remaining: float = 0.0
+## Progress on the final route segment where the train halts for its station
+## stop (the middle of the platform). -1 when no stop is pending.
+var stop_progress: float = -1.0
 
 ## Ordered list of town stops the train visits in a loop. Array[Town]
 var orders: Array[Town] = []
@@ -27,6 +36,8 @@ func set_route(new_route: Array) -> void:
 	route = new_route
 	route_index = 0
 	segment_progress = 0.0
+	boarded_this_leg = false
+	stop_progress = -1.0
 
 ## Check if the train has a route.
 func has_route() -> bool:
@@ -38,8 +49,12 @@ func current_segment() -> TrackSegment:
 		return route[route_index]
 	return null
 
-## Move train along a track segment
+## Move train along a track segment. While dwelling at a station the train
+## stays put and the dwell timer counts down instead.
 func move(delta: float) -> void:
+	if dwell_remaining > 0.0:
+		dwell_remaining = maxf(dwell_remaining - delta, 0.0)
+		return
 	if not has_route():
 		return
 	var distance := speed * delta
@@ -53,10 +68,19 @@ func move(delta: float) -> void:
 				segment_progress = 1.0
 				break
 			continue
-		var remaining := (1.0 - segment_progress) * seg.length()
+		# Halt short of the segment end when a station stop is pending on the
+		# final segment.
+		var target := 1.0
+		var is_stop := false
+		if route_index == route.size() - 1 and stop_progress >= 0.0 and segment_progress < stop_progress:
+			target = stop_progress
+			is_stop = true
+		var remaining := (target - segment_progress) * seg.length()
 		if distance >= remaining:
 			distance -= remaining
-			segment_progress = 1.0
+			segment_progress = target
+			if is_stop:
+				break  # arrived at the platform stop
 			if route_index < route.size() - 1:
 				route_index += 1
 				segment_progress = 0.0
@@ -69,6 +93,11 @@ func move(delta: float) -> void:
 ## Check if train has fully progressed along a track segment.
 func has_completed_route() -> bool:
 	return route.size() > 0 and route_index >= route.size() - 1 and segment_progress >= 1.0
+
+## Whether the train is at (or past) its pending station stop point.
+func at_pending_stop() -> bool:
+	return stop_progress >= 0.0 and route.size() > 0 \
+		and route_index == route.size() - 1 and segment_progress >= stop_progress
 
 ## Get current train position.
 func current_position() -> Vector2:
@@ -83,12 +112,6 @@ func current_angle() -> float:
 	if seg == null:
 		return 0.0
 	return seg.angle_at(segment_progress)
-
-## Get current train destination town (null if destination is a junction).
-func destination_town() -> Town:
-	if route.size() > 0:
-		return route[route.size() - 1].node_end.town
-	return null
 
 ## Get the town the train is currently heading toward per its orders.
 func current_order_town() -> Town:

@@ -1,4 +1,6 @@
 ## A town on the map that generates and holds waiting passengers.
+## Towns are not part of the track graph — building a Station is what
+## links a town to the railway.
 class_name Town
 extends RefCounted
 
@@ -8,14 +10,15 @@ var position: Vector2
 var color: Color
 ## Number of passengers currently waiting at this town.
 var waiting: float = 0.0
-## The network node representing this town in the track graph.
-var node: NetworkNode
+## The station serving this town, if one has been built.
+var station: Station = null
+## Catchment radius of the town circle.
+var radius: float = 60.0
 
 ## Initialize a town with a position and color.
 func _init(pos: Vector2, col: Color) -> void:
 	position = pos
 	color = col
-	node = NetworkNode.from_town(self)
 
 ## Generate passengers at the town.
 func generate_passengers() -> void:

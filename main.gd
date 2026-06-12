@@ -8,7 +8,7 @@ enum GameState { EDITING, SIMULATING }
 var state := GameState.EDITING
 ## All towns placed on the map.
 var towns: Array[Town] = []
-## The track network connecting towns and junctions.
+## The track network of junctions and segments.
 var network: TrackNetwork
 ## Track editor handling drawing state and track operations.
 var editor: TrackEditor
@@ -27,8 +27,14 @@ var hovered_junction: NetworkNode = null
 var mouse_pos := Vector2.ZERO
 ## Whether the player is editing train orders (stop list).
 var editing_orders := false
+## Whether the player is placing a station.
+var placing_station := false
 ## The train's ordered stop list, built before simulation starts.
 var train_orders: Array[Town] = []
+## Transient status/error message shown below the hint text.
+var status_message := ""
+## Seconds remaining before the status message disappears.
+var status_timer := 0.0
 
 ## Rotating palette of colours assigned to new towns.
 var town_palette := [
@@ -39,14 +45,12 @@ var town_palette := [
 ## Index into town_palette for the next town placed.
 var next_color_index := 0
 
-## Visual radius of a town circle.
-const TOWN_RADIUS := 30.0
-## Hit-test radius for clicking on a town.
-const TOWN_HIT_RADIUS := 35.0
 ## Visual radius of a track waypoint dot.
 const WAYPOINT_RADIUS := 5.0
 ## Visual size of a junction diamond (half-width).
 const JUNCTION_RADIUS := 8.0
+## How long status messages stay on screen, in seconds.
+const STATUS_DURATION := 3.0
 
 ## Runs when the node is ready
 func _ready() -> void:
@@ -59,7 +63,7 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		mouse_pos = get_local_mouse_position()
 		hovered_town = _find_town_at(mouse_pos)
-		hovered_junction = editor.find_junction_at(mouse_pos) if hovered_town == null else null
+		hovered_junction = editor.find_junction_at(mouse_pos)
 		queue_redraw()
 		return
 
@@ -71,72 +75,19 @@ func _handle_edit_input(event: InputEvent) -> void:
 	if editing_orders:
 		_handle_order_input(event)
 		return
+	if placing_station:
+		_handle_station_input(event)
+		return
 
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			var click_pos := get_local_mouse_position()
-			var town := _find_town_at(click_pos)
-			var shift: bool = event.shift_pressed
-
 			if editor.drawing:
-				var junction := editor.find_junction_at(click_pos) if town == null else null
-				if town != null and town.node != editor.start_node:
-					editor.finish_at(town.node)
-				elif junction != null and junction != editor.start_node and not shift:
-					editor.finish_at(junction)
-				elif town == null and shift:
-					# Shift+click: place a new junction, finish track to it, start new drawing from it
-					var new_junction: NetworkNode
-					if junction != null and junction != editor.start_node:
-						new_junction = junction
-					else:
-						var track_hit := editor.find_track_at(click_pos)
-						if track_hit.size() > 0:
-							var hit_seg: TrackSegment = track_hit[0]
-							if hit_seg.node_start != editor.start_node and hit_seg.node_end != editor.start_node:
-								new_junction = editor.split_track_at_hit(track_hit)
-						if new_junction == null:
-							new_junction = NetworkNode.junction(click_pos)
-							network.add_node(new_junction)
-					if new_junction != null and new_junction != editor.start_node:
-						editor.finish_and_continue(new_junction)
-				elif town == null and junction == null:
-					var track_hit := editor.find_track_at(click_pos)
-					if track_hit.size() > 0:
-						var hit_seg: TrackSegment = track_hit[0]
-						if hit_seg.node_start == editor.start_node or hit_seg.node_end == editor.start_node:
-							editor.add_waypoint(click_pos)
-						else:
-							var new_junction := editor.split_track_at_hit(track_hit)
-							if new_junction != null and new_junction != editor.start_node:
-								editor.finish_at(new_junction)
-					else:
-						editor.add_waypoint(click_pos)
+				_handle_draw_click(click_pos, event.shift_pressed)
 			else:
-				if town != null:
-					editor.start_drawing(town.node)
-				else:
-					var junction := editor.find_junction_at(click_pos)
-					if junction != null:
-						editor.start_drawing(junction)
-					elif shift:
-						_place_town(click_pos)
-					else:
-						var track_hit := editor.find_track_at(click_pos)
-						if track_hit.size() > 0:
-							var new_junction := editor.split_track_at_hit(track_hit)
-							editor.start_drawing(new_junction)
-
+				_handle_idle_click(click_pos, event.shift_pressed)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			if editor.drawing:
-				editor.cancel()
-			else:
-				var click_pos := get_local_mouse_position()
-				var right_town := _find_town_at(click_pos)
-				if right_town != null:
-					editor.remove_town(right_town, towns, train_orders)
-				else:
-					editor.try_delete_track_at(click_pos)
+			_handle_right_click()
 
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
@@ -150,6 +101,109 @@ func _handle_edit_input(event: InputEvent) -> void:
 			KEY_O:
 				if not editor.drawing:
 					editing_orders = true
+			KEY_P:
+				if not editor.drawing:
+					placing_station = true
+
+## Handles a left-click while a track is being drawn.
+func _handle_draw_click(click_pos: Vector2, shift: bool) -> void:
+	var junction := editor.find_junction_at(click_pos)
+	if junction != null and junction != editor.start_node and not shift:
+		if not editor.finish_at(junction):
+			_show_status(_rejection_message())
+	elif shift:
+		# Shift+click: finish at a junction (existing, on a track, or newly
+		# placed) and continue drawing from it.
+		if junction != null and junction != editor.start_node:
+			if not editor.finish_and_continue(junction):
+				_show_status(_rejection_message())
+			return
+		var track_hit := editor.find_track_at(click_pos)
+		if track_hit.size() > 0:
+			var hit_seg: TrackSegment = track_hit[0]
+			if hit_seg.node_start != editor.start_node and hit_seg.node_end != editor.start_node:
+				if not editor.finish_on_track(track_hit, true):
+					_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
+				return
+		var new_junction := NetworkNode.junction(click_pos)
+		network.add_node(new_junction)
+		if not editor.finish_and_continue(new_junction):
+			network.cleanup_orphan(new_junction)
+			_show_status(_rejection_message())
+	elif junction == null:
+		var track_hit := editor.find_track_at(click_pos)
+		if track_hit.size() > 0:
+			var hit_seg: TrackSegment = track_hit[0]
+			if hit_seg.node_start == editor.start_node or hit_seg.node_end == editor.start_node:
+				editor.add_waypoint(click_pos)
+			elif not editor.finish_on_track(track_hit):
+				_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
+		else:
+			editor.add_waypoint(click_pos)
+
+## Status text explaining the last rejected finish attempt.
+func _rejection_message() -> String:
+	if editor.rejection_reason == "turnout":
+		return "Turnout angle too steep (max %d°) — approach in line with the existing track" \
+			% int(rad_to_deg(TrackEditor.MAX_TURNOUT_ANGLE))
+	return "Curve too tight — add waypoints for a gentler bend"
+
+## Handles a left-click while nothing is being drawn.
+func _handle_idle_click(click_pos: Vector2, shift: bool) -> void:
+	if shift:
+		_place_town(click_pos)
+		return
+	var junction := editor.find_junction_at(click_pos)
+	if junction != null:
+		editor.start_drawing(junction)
+		return
+	var track_hit := editor.find_track_at(click_pos)
+	if track_hit.size() > 0:
+		var new_junction := editor.split_track_at_hit(track_hit)
+		if new_junction == null:
+			_show_status(editor.last_error)
+		else:
+			editor.start_drawing(new_junction)
+	else:
+		# Free-draw start: place a fresh junction on empty ground.
+		var new_junction := NetworkNode.junction(click_pos)
+		network.add_node(new_junction)
+		editor.start_drawing(new_junction)
+
+## Handles a right-click: cancel drawing, delete track, or remove a town.
+func _handle_right_click() -> void:
+	if editor.drawing:
+		editor.cancel()
+		return
+	var click_pos := get_local_mouse_position()
+	var track_hit := editor.find_track_at(click_pos)
+	if track_hit.size() > 0:
+		var seg: TrackSegment = track_hit[0]
+		if seg.is_platform_segment():
+			_show_status("Remove the town to delete its station")
+		else:
+			editor.try_delete_track_at(click_pos)
+		return
+	var town := _find_town_at(click_pos)
+	if town != null:
+		editor.remove_town(town, towns, train_orders)
+
+## Handles inputs while placing a station.
+func _handle_station_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			var station := editor.place_station(get_local_mouse_position(), towns)
+			if station != null:
+				placing_station = false
+			else:
+				_show_status(editor.last_error)
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			placing_station = false
+
+	if event is InputEventKey and event.pressed:
+		match event.keycode:
+			KEY_ESCAPE, KEY_P:
+				placing_station = false
 
 ## Handles inputs while editing train orders.
 func _handle_order_input(event: InputEvent) -> void:
@@ -160,6 +214,8 @@ func _handle_order_input(event: InputEvent) -> void:
 				var idx := train_orders.find(town)
 				if idx >= 0:
 					train_orders.remove_at(idx)
+				elif town.station == null:
+					_show_status("Town needs a station before it can be a stop")
 				else:
 					train_orders.append(town)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
@@ -174,47 +230,64 @@ func _handle_order_input(event: InputEvent) -> void:
 				editing_orders = false
 				_start_simulation()
 
-## Returns the town at a screen position, if there is one.
+## Show a transient status message below the hint text.
+func _show_status(msg: String) -> void:
+	if msg == "":
+		return
+	status_message = msg
+	status_timer = STATUS_DURATION
+
+## Returns the town whose circle contains a screen position, if there is one.
 func _find_town_at(pos: Vector2) -> Town:
 	for town in towns:
-		if pos.distance_to(town.position) < TOWN_HIT_RADIUS:
+		if pos.distance_to(town.position) < town.radius:
 			return town
 	return null
 
-## Place a town at a screen position.
+## Place a town at a screen position. Towns are not part of the track graph.
 func _place_town(pos: Vector2) -> void:
 	var col: Color = town_palette[next_color_index % town_palette.size()]
 	next_color_index += 1
-	var town := Town.new(pos, col)
-	towns.append(town)
-	network.add_node(town.node)
+	towns.append(Town.new(pos, col))
 
 ## Start the simulation.
 func _start_simulation() -> void:
 	if train_orders.size() < 2 or network.segments.size() == 0:
 		return
+	for town in train_orders:
+		if town.station == null or town.station.platforms.size() == 0:
+			_show_status("All stops need a station before starting")
+			return
 	state = GameState.SIMULATING
 	editing_orders = false
+	placing_station = false
 	train = Train.new()
 	train.orders = train_orders.duplicate()
 	train.current_order_index = 0
-	_dispatch_to_next_order(train_orders[0].node)
+	# The train starts at the far end of the first stop's platform.
+	var start_platform: Platform = train_orders[0].station.platforms[0]
+	_dispatch_to_next_order(start_platform.segment.node_end)
 
-## Dispatch the train toward its next order stop via Dijkstra.
+## Dispatch the train toward its next order stop's platform via Dijkstra.
 func _dispatch_to_next_order(from_node: NetworkNode) -> void:
 	train.advance_order()
 	var target := train.current_order_town()
-	if target == null:
+	if target == null or target.station == null or target.station.platforms.size() == 0:
 		train.route = []
 		return
-	var route := network.find_route(from_node, target.node)
+	var route := network.find_route_to_platform(from_node, target.station.platforms[0])
 	if route.size() > 0:
 		train.set_route(route)
+		# The route ends with the platform traversal — call at its middle.
+		train.stop_progress = 0.5
 	else:
 		train.route = []
 
 ## Handle 1 simulation tick.
 func _process(delta: float) -> void:
+	if status_timer > 0.0:
+		status_timer -= delta
+
 	if state == GameState.SIMULATING:
 		if frame_count > 9:
 			for town in towns:
@@ -222,29 +295,47 @@ func _process(delta: float) -> void:
 			frame_count = 0
 
 		train.move(delta)
-		if train.has_completed_route():
-			var dest_town := train.destination_town()
-			var end_node: NetworkNode = train.route[-1].node_end
-			if dest_town != null:
-				money += train.unload() * 10
-				train.board_from(dest_town)
-			_dispatch_to_next_order(end_node)
+		if train.dwell_remaining <= 0.0:
+			if train.at_pending_stop():
+				if train.boarded_this_leg:
+					train.stop_progress = -1.0  # dwell over — pull away
+				else:
+					_arrive_at_platform()
+			elif train.has_completed_route() and train.boarded_this_leg:
+				_dispatch_to_next_order(train.route[-1].node_end)
 
 		frame_count += 1
 
 	queue_redraw()
 
+## The train has halted at its stop point (the middle of the target platform):
+## unload, board, and wait out the dwell time.
+func _arrive_at_platform() -> void:
+	train.boarded_this_leg = true
+	var seg := train.current_segment()
+	if seg != null and seg.is_platform_segment() and seg.platform.station != null:
+		var town := seg.platform.station.town
+		if town != null:
+			money += train.unload() * 10
+			train.board_from(town)
+	train.dwell_remaining = train.dwell_time
+
 ## Draw game scene.
 func _draw() -> void:
-	_draw_tracks()
-	_draw_junctions()
 	_draw_towns()
+	_draw_tracks()
+	_draw_platforms()
+	_draw_junctions()
 
 	if state == GameState.EDITING:
 		_draw_editor_overlay()
 	elif state == GameState.SIMULATING:
 		_draw_train()
 		_draw_hud()
+
+	if status_timer > 0.0:
+		draw_string(ThemeDB.fallback_font, Vector2(10, 40), status_message,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.RED)
 
 ## Draw tracks.
 func _draw_tracks() -> void:
@@ -256,81 +347,122 @@ func _draw_tracks() -> void:
 			draw_polyline(seg.get_baked_points(), Color.GRAY, 3.0)
 			drawn[key_a] = true
 
+## Draw station platforms alongside their track segments.
+func _draw_platforms() -> void:
+	for town in towns:
+		if town.station == null:
+			continue
+		for platform in town.station.platforms:
+			_draw_platform(platform, town.color)
+
+## Draw one platform as a filled strip offset to one side of its segment.
+func _draw_platform(platform: Platform, color: Color) -> void:
+	var points := platform.segment.get_baked_points()
+	if points.size() < 2:
+		return
+	var near := PackedVector2Array()
+	var far := PackedVector2Array()
+	for i in range(points.size()):
+		var prev := points[maxi(i - 1, 0)]
+		var next := points[mini(i + 1, points.size() - 1)]
+		var perp := (next - prev).normalized().orthogonal() * platform.side
+		near.append(points[i] + perp * 5.0)
+		far.append(points[i] + perp * platform.width)
+	var fill := color
+	fill.a = 0.45
+	for i in range(points.size() - 1):
+		draw_colored_polygon(PackedVector2Array([
+			near[i], near[i + 1], far[i + 1], far[i],
+		]), fill)
+	draw_polyline(near, color, 1.5)
+	draw_polyline(far, color, 1.5)
+	draw_line(near[0], far[0], color, 1.5)
+	draw_line(near[near.size() - 1], far[far.size() - 1], color, 1.5)
+
 ## Draw junction nodes as diamonds.
 func _draw_junctions() -> void:
 	for node in network.nodes:
-		if node.is_junction():
-			var p := node.position
-			var r := JUNCTION_RADIUS
-			var diamond := PackedVector2Array([
-				p + Vector2(0, -r), p + Vector2(r, 0),
-				p + Vector2(0, r), p + Vector2(-r, 0),
-				p + Vector2(0, -r),
-			])
-			draw_colored_polygon(PackedVector2Array([
-				p + Vector2(0, -r), p + Vector2(r, 0),
-				p + Vector2(0, r), p + Vector2(-r, 0),
-			]), Color.WHITE)
-			draw_polyline(diamond, Color.DIM_GRAY, 2.0)
-			if state == GameState.EDITING and not editing_orders:
-				if node == hovered_junction:
-					var hr := JUNCTION_RADIUS + 5
-					if editor.drawing and node != editor.start_node:
-						draw_polyline(PackedVector2Array([
-							p + Vector2(0, -hr), p + Vector2(hr, 0),
-							p + Vector2(0, hr), p + Vector2(-hr, 0),
-							p + Vector2(0, -hr),
-						]), Color.GREEN, 2.0)
-					elif not editor.drawing:
-						draw_polyline(PackedVector2Array([
-							p + Vector2(0, -hr), p + Vector2(hr, 0),
-							p + Vector2(0, hr), p + Vector2(-hr, 0),
-							p + Vector2(0, -hr),
-						]), Color.WHITE, 2.0)
-				if editor.drawing and node == editor.start_node:
-					var hr := JUNCTION_RADIUS + 5
+		var p := node.position
+		var r := JUNCTION_RADIUS
+		var diamond := PackedVector2Array([
+			p + Vector2(0, -r), p + Vector2(r, 0),
+			p + Vector2(0, r), p + Vector2(-r, 0),
+			p + Vector2(0, -r),
+		])
+		draw_colored_polygon(PackedVector2Array([
+			p + Vector2(0, -r), p + Vector2(r, 0),
+			p + Vector2(0, r), p + Vector2(-r, 0),
+		]), Color.WHITE)
+		draw_polyline(diamond, Color.DIM_GRAY, 2.0)
+		if state == GameState.EDITING and not editing_orders and not placing_station:
+			if node == hovered_junction:
+				var hr := JUNCTION_RADIUS + 5
+				if editor.drawing and node != editor.start_node:
+					draw_polyline(PackedVector2Array([
+						p + Vector2(0, -hr), p + Vector2(hr, 0),
+						p + Vector2(0, hr), p + Vector2(-hr, 0),
+						p + Vector2(0, -hr),
+					]), Color.GREEN, 2.0)
+				elif not editor.drawing:
 					draw_polyline(PackedVector2Array([
 						p + Vector2(0, -hr), p + Vector2(hr, 0),
 						p + Vector2(0, hr), p + Vector2(-hr, 0),
 						p + Vector2(0, -hr),
 					]), Color.WHITE, 2.0)
+			if editor.drawing and node == editor.start_node:
+				var hr := JUNCTION_RADIUS + 5
+				draw_polyline(PackedVector2Array([
+					p + Vector2(0, -hr), p + Vector2(hr, 0),
+					p + Vector2(0, hr), p + Vector2(-hr, 0),
+					p + Vector2(0, -hr),
+				]), Color.WHITE, 2.0)
 
-## Draw towns.
+## Draw towns as catchment circles. Stations link a town to the railway; a
+## town without one gets a dashed outline.
 func _draw_towns() -> void:
 	for town in towns:
-		draw_circle(town.position, TOWN_RADIUS, town.color)
-		if state == GameState.EDITING and not editing_orders:
-			if town == hovered_town and not editor.drawing:
-				draw_arc(town.position, TOWN_RADIUS + 4, 0, TAU, 32, Color.WHITE, 2.0)
-			if editor.drawing and town.node == editor.start_node:
-				draw_arc(town.position, TOWN_RADIUS + 4, 0, TAU, 32, Color.WHITE, 2.0)
-		if state == GameState.EDITING and editing_orders:
+		var fill := town.color
+		fill.a = 0.25
+		draw_circle(town.position, town.radius, fill)
+		if town.station != null:
+			draw_arc(town.position, town.radius, 0, TAU, 48, town.color, 2.0)
+			var platform_mid: Vector2 = town.station.platforms[0].segment.position_at(0.5)
+			_draw_dashed_line(PackedVector2Array([town.position, platform_mid]),
+				Color(town.color, 0.6), 1.5, 6.0)
+		else:
+			_draw_dashed_circle(town.position, town.radius, Color(town.color, 0.6), 2.0)
+		draw_circle(town.position, 6.0, town.color)
+
+		if state == GameState.EDITING and (editing_orders or placing_station):
 			if town == hovered_town:
-				draw_arc(town.position, TOWN_RADIUS + 4, 0, TAU, 32, Color.YELLOW, 2.0)
+				draw_arc(town.position, town.radius + 4, 0, TAU, 48, Color.YELLOW, 2.0)
 		if state == GameState.SIMULATING:
-			draw_string(ThemeDB.fallback_font, town.position + Vector2(-30, -40),
-				"Waiting: %d" % int(town.waiting))
+			var label_color := Color.WHITE if town.station != null else Color.RED
+			draw_string(ThemeDB.fallback_font, town.position + Vector2(-30, -town.radius - 8),
+				"Waiting: %d" % int(town.waiting), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, label_color)
+
 	if state == GameState.EDITING:
 		for i in range(train_orders.size()):
 			var town: Town = train_orders[i]
-			var label := str(i + 1)
-			draw_circle(town.position + Vector2(TOWN_RADIUS, -TOWN_RADIUS), 12, Color.WHITE)
-			draw_string(ThemeDB.fallback_font,
-				town.position + Vector2(TOWN_RADIUS - 4, -TOWN_RADIUS + 5),
-				label, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.BLACK)
+			var label_pos := town.position + Vector2(town.radius, -town.radius) * 0.75
+			draw_circle(label_pos, 12, Color.WHITE)
+			draw_string(ThemeDB.fallback_font, label_pos + Vector2(-4, 5),
+				str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.BLACK)
 
 ## Draw editor overlay.
 func _draw_editor_overlay() -> void:
 	if editing_orders:
 		_draw_order_overlay()
+	elif placing_station:
+		draw_string(ThemeDB.fallback_font, Vector2(10, 20),
+			"STATION: Click a track inside a town's circle | ESC/P to cancel")
 	elif editor.drawing:
 		_draw_curvature_preview()
 		for wp in editor.waypoints:
 			draw_circle(wp, WAYPOINT_RADIUS, Color.WHITE)
-		if hovered_town != null and hovered_town.node != editor.start_node:
-			draw_arc(hovered_town.position, TOWN_RADIUS + 4, 0, TAU, 32, Color.GREEN, 2.0)
 		_draw_turnout_angle_preview()
-		var hint_text := "Click to add curve points | Click town/junction/track to finish | SHIFT+Click for junction chain | ESC to cancel | Z to undo"
+		_draw_finish_angle_preview()
+		var hint_text := "Click to add curve points | Click junction/track to finish | SHIFT+Click to finish at a new junction | ESC to cancel | Z to undo"
 		if editor.last_finish_rejected:
 			if editor.rejection_reason == "turnout":
 				hint_text = "TURNOUT ANGLE TOO STEEP — approach at a shallower angle | " + hint_text
@@ -338,7 +470,7 @@ func _draw_editor_overlay() -> void:
 				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
-		var hint := "SHIFT+CLICK to place towns | Click town/junction/track to draw | RIGHT-CLICK to delete | O to edit orders"
+		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | O to edit orders"
 		if train_orders.size() >= 2 and network.segments.size() > 0:
 			hint += " | SPACE to start simulation"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
@@ -376,21 +508,46 @@ func _draw_turnout_angle_preview() -> void:
 	if existing.size() == 0:
 		return
 	var preview := editor.build_preview_segment(mouse_pos)
-	var new_angle := preview.angle_at(0.0)
-	var min_diff := INF
-	for a in existing:
-		var diff := absf(TrackEditor.angle_difference(a, new_angle))
-		var diff_rev := absf(TrackEditor.angle_difference(a, new_angle + PI))
-		min_diff = minf(min_diff, minf(diff, diff_rev))
+	if preview.length() <= 0.0:
+		return
+	var min_diff := TrackEditor.min_divergence(existing, preview.angle_at(0.0))
 	var color := Color.GREEN if min_diff <= TrackEditor.MAX_TURNOUT_ANGLE else Color.RED
 	var label := "%d°" % int(rad_to_deg(min_diff))
 	draw_string(ThemeDB.fallback_font,
 		editor.start_node.position + Vector2(15, -15), label,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 14, color)
 
+## Draw the angle indicator at the prospective finish target under the mouse —
+## the junction or track point the click would connect to.
+func _draw_finish_angle_preview() -> void:
+	var target_pos: Vector2
+	var existing: Array[float] = []
+	if hovered_junction != null and hovered_junction != editor.start_node:
+		existing = network.departure_angles_at(hovered_junction)
+		target_pos = hovered_junction.position
+	else:
+		var hit := editor.find_track_at(mouse_pos)
+		if hit.size() == 0:
+			return
+		var seg: TrackSegment = hit[0]
+		if seg.node_start == editor.start_node or seg.node_end == editor.start_node:
+			return
+		existing.append(seg.angle_at(hit[1]))
+		target_pos = seg.position_at(hit[1])
+	if existing.size() == 0:
+		return
+	var preview := editor.build_preview_segment(target_pos)
+	if preview.length() <= 0.0:
+		return
+	var arrival := preview.angle_at(1.0) + PI
+	var min_diff := TrackEditor.min_divergence(existing, arrival)
+	var color := Color.GREEN if min_diff <= TrackEditor.MAX_TURNOUT_ANGLE else Color.RED
+	draw_string(ThemeDB.fallback_font, target_pos + Vector2(15, 25),
+		"%d°" % int(rad_to_deg(min_diff)), HORIZONTAL_ALIGNMENT_LEFT, -1, 14, color)
+
 ## Draw order editing overlay — hint text and route preview.
 func _draw_order_overlay() -> void:
-	var hint := "ORDERS: Click towns to add/remove stops | RIGHT-CLICK to remove last | ESC/O to finish"
+	var hint := "ORDERS: Click towns with stations to add/remove stops | RIGHT-CLICK to remove last | ESC/O to finish"
 	if train_orders.size() >= 2:
 		hint += " | SPACE to start simulation"
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
@@ -419,6 +576,13 @@ func _draw_dashed_line(points: PackedVector2Array, color: Color, width: float, d
 			drawn += seg_len
 			drawing = not drawing
 
+## Draw a dashed circle outline.
+func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: float) -> void:
+	var dashes := 24
+	for i in range(dashes):
+		var a0 := TAU * float(i) / float(dashes)
+		draw_arc(center, radius, a0, a0 + TAU / float(dashes) * 0.6, 4, color, width)
+
 ## Draw train.
 func _draw_train() -> void:
 	var train_pos := train.current_position()
@@ -430,6 +594,9 @@ func _draw_train() -> void:
 	draw_set_transform(Vector2.ZERO, 0)
 	draw_string(ThemeDB.fallback_font, train_pos + Vector2(-20, -15),
 		"%d" % train.passengers_on_board)
+	if train.dwell_remaining > 0.0:
+		draw_string(ThemeDB.fallback_font, train_pos + Vector2(-30, 28),
+			"Boarding...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.WHITE)
 
 ## Draw HUD.
 func _draw_hud() -> void:
