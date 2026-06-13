@@ -38,6 +38,9 @@ func run_all() -> void:
 	_t("route_to_platform_from_entry_node", _test_route_to_platform_from_entry)
 	_t("route_to_platform_from_exit_node", _test_route_to_platform_from_exit)
 	_t("route_to_platform_no_path", _test_route_to_platform_no_path)
+	_t("unroutable_stop_connected_loop", _test_unroutable_stop_connected)
+	_t("unroutable_stop_disconnected", _test_unroutable_stop_disconnected)
+	_t("unroutable_stop_on_wrap_leg", _test_unroutable_stop_wrap)
 
 func _test_add_stored() -> void:
 	var net := TrackNetwork.new()
@@ -222,3 +225,36 @@ func _test_route_to_platform_no_path() -> void:
 	var platform := _platform(net, _node(0, 0), _node(120, 0))
 	var route := net.find_route_to_platform(lonely, platform)
 	eq(route.size(), 0)
+
+func _test_unroutable_stop_connected() -> void:
+	# p1(a-b) <-> p2(c-d) joined by bidirectional track on both legs.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var b := _node(120, 0)
+	var c := _node(240, 0)
+	var d := _node(360, 0)
+	var p1 := _platform(net, a, b)
+	var p2 := _platform(net, c, d)
+	net.add_segment(_seg(b, c))
+	net.add_segment(_seg(c, b))
+	net.add_segment(_seg(d, a))
+	net.add_segment(_seg(a, d))
+	eq(net.first_unroutable_stop([p1, p2]), -1)
+
+func _test_unroutable_stop_disconnected() -> void:
+	# Two platforms on separate track islands — stop 2 is unreachable.
+	var net := TrackNetwork.new()
+	var p1 := _platform(net, _node(0, 0), _node(120, 0))
+	var p2 := _platform(net, _node(500, 0), _node(620, 0))
+	eq(net.first_unroutable_stop([p1, p2]), 1)
+
+func _test_unroutable_stop_wrap() -> void:
+	# One-way link p1 -> p2 but no way back: the loop fails on the wrap-around
+	# leg, so stop 1 (index 0) is the unreachable one.
+	var net := TrackNetwork.new()
+	var b := _node(120, 0)
+	var c := _node(240, 0)
+	var p1 := _platform(net, _node(0, 0), b)
+	var p2 := _platform(net, c, _node(360, 0))
+	net.add_segment(_seg(b, c))
+	eq(net.first_unroutable_stop([p1, p2]), 0)

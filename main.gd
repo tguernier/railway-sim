@@ -254,10 +254,16 @@ func _place_town(pos: Vector2) -> void:
 func _start_simulation() -> void:
 	if train_orders.size() < 2 or network.segments.size() == 0:
 		return
+	var stop_platforms: Array = []
 	for town in train_orders:
 		if town.station == null or town.station.platforms.size() == 0:
 			_show_status("All stops need a station before starting")
 			return
+		stop_platforms.append(town.station.platforms[0])
+	var unroutable := network.first_unroutable_stop(stop_platforms)
+	if unroutable != -1:
+		_show_status("No track route to stop %d — connect it to the other stops" % (unroutable + 1))
+		return
 	state = GameState.SIMULATING
 	editing_orders = false
 	placing_station = false
@@ -269,11 +275,14 @@ func _start_simulation() -> void:
 	_dispatch_to_next_order(start_platform.segment.node_end)
 
 ## Dispatch the train toward its next order stop's platform via Dijkstra.
+## Orders are validated before the simulation starts, but a leg can still
+## come up empty if the network or stations change mid-simulation — in that
+## case the simulation is halted rather than leaving the train stranded.
 func _dispatch_to_next_order(from_node: NetworkNode) -> void:
 	train.advance_order()
 	var target := train.current_order_town()
 	if target == null or target.station == null or target.station.platforms.size() == 0:
-		train.route = []
+		_stop_simulation("A stop lost its station — simulation stopped")
 		return
 	var route := network.find_route_to_platform(from_node, target.station.platforms[0])
 	if route.size() > 0:
@@ -281,7 +290,13 @@ func _dispatch_to_next_order(from_node: NetworkNode) -> void:
 		# The route ends with the platform traversal — call at its middle.
 		train.stop_progress = 0.5
 	else:
-		train.route = []
+		_stop_simulation("No track route to the next stop — simulation stopped")
+
+## Halt the simulation and return to editing mode.
+func _stop_simulation(msg: String) -> void:
+	state = GameState.EDITING
+	train = null
+	_show_status(msg)
 
 ## Handle 1 simulation tick.
 func _process(delta: float) -> void:

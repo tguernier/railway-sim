@@ -81,6 +81,27 @@ func find_route_to_platform(from: NetworkNode, platform: Platform) -> Array:
 	route_b.append(platform.reverse_segment)
 	return route_b
 
+## Check that a loop of station platforms is fully connected, mirroring how
+## dispatch routes the train: start at the far end of the first platform,
+## route to each subsequent platform in turn, and finish back at the first.
+## Returns the index of the first platform that cannot be reached from the
+## stop before it, or -1 if the whole loop is routable. Safe to call whenever
+## the network changes (e.g. before starting the simulation, or to revalidate
+## orders after the track is edited mid-simulation).
+##
+## platforms: Array[Platform]
+func first_unroutable_stop(platforms: Array) -> int:
+	if platforms.size() == 0:
+		return -1
+	var from_node: NetworkNode = platforms[0].segment.node_end
+	for i in range(1, platforms.size() + 1):
+		var idx := i % platforms.size()
+		var route := find_route_to_platform(from_node, platforms[idx])
+		if route.size() == 0:
+			return idx
+		from_node = route[-1].node_end
+	return -1
+
 ## Total length of a route (array of segments).
 func _route_length(route: Array) -> float:
 	var total := 0.0
