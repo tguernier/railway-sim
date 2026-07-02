@@ -99,6 +99,21 @@ func at_pending_stop() -> bool:
 	return stop_progress >= 0.0 and route.size() > 0 \
 		and route_index == route.size() - 1 and segment_progress >= stop_progress
 
+## Resume a freshly set route from a station stop. prev_seg / prev_progress
+## describe where the train was stopped; reverse_seg is the opposite-direction
+## twin of prev_seg. If the new route leaves along reverse_seg (a dead-end
+## station) the train turns around in place — same point, opposite heading —
+## otherwise prev_seg is prepended so the train first rolls forward through
+## its remainder before joining the new route.
+func resume_from_stop(prev_seg: TrackSegment, prev_progress: float, reverse_seg: TrackSegment) -> void:
+	if route.size() == 0:
+		return
+	if route[0] == reverse_seg:
+		segment_progress = 1.0 - prev_progress
+	else:
+		route.insert(0, prev_seg)
+		segment_progress = prev_progress
+
 ## Get current train position.
 func current_position() -> Vector2:
 	var seg := current_segment()

@@ -22,6 +22,8 @@ func run_all() -> void:
 	_t("dwell_blocks_movement_and_counts_down", _test_dwell_blocks_movement)
 	_t("moves_again_after_dwell_expires", _test_moves_after_dwell)
 	_t("move_advances_segment_progress", _test_move_advances)
+	_t("resume_from_stop_turns_around_on_reverse", _test_resume_turnaround)
+	_t("resume_from_stop_prepends_forward_segment", _test_resume_forward)
 	_t("has_completed_route_false_at_start", _test_not_completed_at_start)
 	_t("has_completed_route_true_after_full_move", _test_completed_after_move)
 	_t("unload_returns_count_and_clears", _test_unload)
@@ -101,6 +103,39 @@ func _test_move_advances() -> void:
 	tr.set_route([_seg(_node(0, 0), _node(500, 0))])
 	tr.move(0.1)  # 150 px/s * 0.1 s = 15 px into a 500 px segment
 	gt(tr.segment_progress, 0.0)
+
+func _test_resume_turnaround() -> void:
+	# Stopped at 0.3 along the platform; the new route leaves along the
+	# reverse twin, so the train flips in place to the mirrored point.
+	var a := _node(0, 0)
+	var b := _node(500, 0)
+	var fwd := _seg(a, b)
+	var rev := _seg(b, a)
+	var out := _seg(a, _node(-500, 0))
+	var tr := Train.new()
+	tr.set_route([rev, out])
+	tr.resume_from_stop(fwd, 0.3, rev)
+	eq(tr.route.size(), 2)  # nothing prepended
+	eq(tr.current_segment(), rev)
+	approx(tr.segment_progress, 0.7, 0.0001)
+	approx(tr.current_position().x, 150.0, 1.0)  # same spot, other direction
+
+func _test_resume_forward() -> void:
+	# The new route continues past the platform end, so the platform segment
+	# is prepended and the train rolls forward from where it stopped.
+	var a := _node(0, 0)
+	var b := _node(500, 0)
+	var platform_seg := _seg(a, b)
+	var rev := _seg(b, a)
+	var onward := _seg(b, _node(1000, 0))
+	var tr := Train.new()
+	tr.set_route([onward])
+	tr.resume_from_stop(platform_seg, 0.5, rev)
+	eq(tr.route.size(), 2)
+	eq(tr.current_segment(), platform_seg)
+	eq(tr.segment_progress, 0.5)
+	tr.move(100.0)  # more than enough to finish both segments
+	is_true(tr.has_completed_route())
 
 func _test_not_completed_at_start() -> void:
 	var tr := Train.new()

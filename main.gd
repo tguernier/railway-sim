@@ -313,7 +313,7 @@ func _process(delta: float) -> void:
 		if train.dwell_remaining <= 0.0:
 			if train.at_pending_stop():
 				if train.boarded_this_leg:
-					train.stop_progress = -1.0  # dwell over — pull away
+					_depart_from_stop()
 				else:
 					_arrive_at_platform()
 			elif train.has_completed_route() and train.boarded_this_leg:
@@ -322,6 +322,23 @@ func _process(delta: float) -> void:
 		frame_count += 1
 
 	queue_redraw()
+
+## The dwell is over: dispatch the next leg while the train sits at its stop
+## point. When the leg leaves back the way the train came in (a dead-end
+## station), the train turns around at the platform instead of rolling to the
+## end of the track and bouncing back; otherwise it keeps its place and rolls
+## forward through the rest of the platform onto the new route.
+func _depart_from_stop() -> void:
+	var seg := train.current_segment()
+	train.stop_progress = -1.0  # dwell over — pull away
+	if seg == null or not seg.is_platform_segment():
+		return  # fall back to dispatching when the route completes
+	var progress := train.segment_progress
+	var p: Platform = seg.platform
+	var reverse_seg := p.reverse_segment if seg == p.segment else p.segment
+	_dispatch_to_next_order(seg.node_end)
+	if train != null and train.has_route():
+		train.resume_from_stop(seg, progress, reverse_seg)
 
 ## The train has halted at its stop point (the middle of the target platform):
 ## unload, board, and wait out the dwell time.
