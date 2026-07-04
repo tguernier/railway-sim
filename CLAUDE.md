@@ -62,7 +62,8 @@ main.gd (Node2D)          — game state, input handling, all drawing (_draw)
 | Shift+Left-click (while drawing) | Finish at new junction and continue drawing |
 | Right-click / Escape | Cancel drawing |
 | Right-click track / town | Delete track / remove town (and its station) |
-| Z | Undo last waypoint |
+| Z | Undo last waypoint (of the in-progress track only) |
+| U | Undo the last build action — town, track, split, station, delete, order edit (LIFO snapshots; works in the orders/station sub-modes, ignored while drawing) |
 | P | Place a station (click a track inside a town circle) |
 | O | Edit train orders (click towns with stations) |
 | R | Reset the game to the initial empty editing state (works in any phase) |

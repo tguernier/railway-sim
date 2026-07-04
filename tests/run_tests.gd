@@ -11,6 +11,8 @@ func _initialize() -> void:
 		TestTrackEditor.new(),
 		TestStation.new(),
 		TestTrain.new(),
+		TestGameSnapshot.new(),
+		TestUndo.new(),
 	]
 
 	var total_pass := 0

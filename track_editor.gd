@@ -219,15 +219,16 @@ func split_track_at_hit(hit: Array) -> NetworkNode:
 	return junction
 
 ## Try to delete the track at a screen position. Platform segments are
-## protected — the station must be removed first.
-func try_delete_track_at(pos: Vector2) -> void:
+## protected — the station must be removed first. Returns true if a track
+## pair was deleted.
+func try_delete_track_at(pos: Vector2) -> bool:
 	var hit := find_track_at(pos)
 	if hit.size() == 0:
-		return
+		return false
 	var seg: TrackSegment = hit[0]
 	if seg.is_platform_segment():
 		last_error = "Remove the station before deleting its platform track"
-		return
+		return false
 	last_error = ""
 	var reverse := seg.reverse
 	network.remove_segment(seg)
@@ -235,6 +236,7 @@ func try_delete_track_at(pos: Vector2) -> void:
 		network.remove_segment(reverse)
 	network.cleanup_orphan(seg.node_start)
 	network.cleanup_orphan(seg.node_end)
+	return true
 
 ## Remove a town from the map. Towns are not graph nodes, so this only needs
 ## to tear down the town's station (if any) and drop it from the lists.

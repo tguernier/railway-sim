@@ -195,7 +195,8 @@ func _test_delete_track() -> void:
 	var ed := _editor()
 	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	eq(ed.network.segments.size(), 2)
-	ed.try_delete_track_at(Vector2(100, 0))
+	is_false(ed.try_delete_track_at(Vector2(100, 100)))  # miss reports false
+	is_true(ed.try_delete_track_at(Vector2(100, 0)))
 	eq(ed.network.segments.size(), 0)
 
 func _test_split_track() -> void:
@@ -429,7 +430,7 @@ func _test_delete_rejected_on_platform() -> void:
 	var towns: Array[Town] = [town]
 	ed.place_station(Vector2(150, 0), towns)
 	eq(ed.network.segments.size(), 6)
-	ed.try_delete_track_at(Vector2(150, 0))  # platform centre
+	is_false(ed.try_delete_track_at(Vector2(150, 0)))  # platform centre
 	is_true(ed.last_error != "")
 	eq(ed.network.segments.size(), 6)  # unchanged
 

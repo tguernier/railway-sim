@@ -37,6 +37,11 @@ var car_count := 2
 var status_message := ""
 ## Seconds remaining before the status message disappears.
 var status_timer := 0.0
+## Snapshots of the editable world, most recent last; U pops and restores.
+var undo_stack: Array[GameSnapshot] = []
+
+## Maximum number of undo snapshots retained.
+const UNDO_LIMIT := 50
 
 ## Rotating palette of colours assigned to new towns.
 var town_palette := [
@@ -80,7 +85,42 @@ func _reset_game() -> void:
 	next_color_index = 0
 	status_message = ""
 	status_timer = 0.0
+	undo_stack = []
 	queue_redraw()
+
+## Capture a snapshot of the editable state onto the undo stack. Called just
+## before each build action; if the action then fails, the caller discards
+## the entry with _discard_undo() so a rejected click doesn't burn an undo.
+func _push_undo() -> void:
+	undo_stack.append(GameSnapshot.capture(self))
+	if undo_stack.size() > UNDO_LIMIT:
+		undo_stack.pop_front()
+
+## Drop the snapshot pushed for an action that turned out to fail.
+func _discard_undo() -> void:
+	undo_stack.pop_back()
+
+## Snapshot before finishing the track being drawn. A fresh free-draw start
+## junction is not part of the committed world yet (cancelling would
+## orphan-clean it), so it is captured without it — undoing a finished track
+## then removes the fresh junction too instead of leaving a crumb.
+func _push_undo_for_finish() -> void:
+	var start := editor.start_node
+	var fresh: bool = network.get_outgoing(start).size() == 0 \
+		and network.get_incoming(start).size() == 0
+	if fresh:
+		network.nodes.erase(start)
+	_push_undo()
+	if fresh:
+		network.add_node(start)
+
+## Revert the last build action by restoring the most recent snapshot.
+func _undo() -> void:
+	if undo_stack.is_empty():
+		_show_status("Nothing to undo")
+		return
+	var snap: GameSnapshot = undo_stack.pop_back()
+	snap.restore(self)
 
 ## Runs when there is an input event
 func _input(event: InputEvent) -> void:
@@ -101,6 +141,14 @@ func _input(event: InputEvent) -> void:
 
 ## Handles inputs for editing mode.
 func _handle_edit_input(event: InputEvent) -> void:
+	# U undoes the last build action. Checked before the sub-mode dispatch so
+	# it also works while editing orders or placing a station; while drawing a
+	# track it is ignored (Z pops waypoints, ESC/right-click cancels).
+	if event is InputEventKey and event.pressed and event.keycode == KEY_U:
+		if not editor.drawing:
+			_undo()
+		return
+
 	if editing_orders:
 		_handle_order_input(event)
 		return
@@ -138,30 +186,39 @@ func _handle_edit_input(event: InputEvent) -> void:
 			KEY_BRACKETRIGHT:
 				car_count = mini(car_count + 1, _max_car_count())
 
-## Handles a left-click while a track is being drawn.
+## Handles a left-click while a track is being drawn. Each finish attempt is
+## an undo step: snapshot first, discard the entry if the finish is rejected.
 func _handle_draw_click(click_pos: Vector2, shift: bool) -> void:
 	var junction := editor.find_junction_at(click_pos)
 	if junction != null and junction != editor.start_node and not shift:
+		_push_undo_for_finish()
 		if not editor.finish_at(junction):
+			_discard_undo()
 			_show_status(_rejection_message())
 	elif shift:
 		# Shift+click: finish at a junction (existing, on a track, or newly
 		# placed) and continue drawing from it.
 		if junction != null and junction != editor.start_node:
+			_push_undo_for_finish()
 			if not editor.finish_and_continue(junction):
+				_discard_undo()
 				_show_status(_rejection_message())
 			return
 		var track_hit := editor.find_track_at(click_pos)
 		if track_hit.size() > 0:
 			var hit_seg: TrackSegment = track_hit[0]
 			if hit_seg.node_start != editor.start_node and hit_seg.node_end != editor.start_node:
+				_push_undo_for_finish()
 				if not editor.finish_on_track(track_hit, true):
+					_discard_undo()
 					_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
 				return
+		_push_undo_for_finish()
 		var new_junction := NetworkNode.junction(click_pos)
 		network.add_node(new_junction)
 		if not editor.finish_and_continue(new_junction):
 			network.cleanup_orphan(new_junction)
+			_discard_undo()
 			_show_status(_rejection_message())
 	elif junction == null:
 		var track_hit := editor.find_track_at(click_pos)
@@ -169,8 +226,11 @@ func _handle_draw_click(click_pos: Vector2, shift: bool) -> void:
 			var hit_seg: TrackSegment = track_hit[0]
 			if hit_seg.node_start == editor.start_node or hit_seg.node_end == editor.start_node:
 				editor.add_waypoint(click_pos)
-			elif not editor.finish_on_track(track_hit):
-				_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
+			else:
+				_push_undo_for_finish()
+				if not editor.finish_on_track(track_hit):
+					_discard_undo()
+					_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
 		else:
 			editor.add_waypoint(click_pos)
 
@@ -192,8 +252,12 @@ func _handle_idle_click(click_pos: Vector2, shift: bool) -> void:
 		return
 	var track_hit := editor.find_track_at(click_pos)
 	if track_hit.size() > 0:
+		# The split persists even if the drawing is later cancelled, so it is
+		# its own undo step.
+		_push_undo()
 		var new_junction := editor.split_track_at_hit(track_hit)
 		if new_junction == null:
+			_discard_undo()
 			_show_status(editor.last_error)
 		else:
 			editor.start_drawing(new_junction)
@@ -208,28 +272,30 @@ func _handle_right_click() -> void:
 	if editor.drawing:
 		editor.cancel()
 		return
-	var click_pos := get_local_mouse_position()
+	_right_click_at(get_local_mouse_position())
+
+## Delete the track or remove the town at a position, as one undo step each.
+func _right_click_at(click_pos: Vector2) -> void:
 	var track_hit := editor.find_track_at(click_pos)
 	if track_hit.size() > 0:
 		var seg: TrackSegment = track_hit[0]
 		if seg.is_platform_segment():
 			_show_status("Remove the town to delete its station")
 		else:
-			editor.try_delete_track_at(click_pos)
+			_push_undo()
+			if not editor.try_delete_track_at(click_pos):
+				_discard_undo()
 		return
 	var town := _find_town_at(click_pos)
 	if town != null:
+		_push_undo()
 		editor.remove_town(town, towns, train_orders)
 
 ## Handles inputs while placing a station.
 func _handle_station_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			var station := editor.place_station(get_local_mouse_position(), towns)
-			if station != null:
-				placing_station = false
-			else:
-				_show_status(editor.last_error)
+			_try_place_station(get_local_mouse_position())
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			placing_station = false
 
@@ -238,22 +304,23 @@ func _handle_station_input(event: InputEvent) -> void:
 			KEY_ESCAPE, KEY_P:
 				placing_station = false
 
+## Build a station at a position, as one undo step if it succeeds.
+func _try_place_station(pos: Vector2) -> void:
+	_push_undo()
+	var station := editor.place_station(pos, towns)
+	if station != null:
+		placing_station = false
+	else:
+		_discard_undo()
+		_show_status(editor.last_error)
+
 ## Handles inputs while editing train orders.
 func _handle_order_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			var town := _find_town_at(get_local_mouse_position())
-			if town != null:
-				var idx := train_orders.find(town)
-				if idx >= 0:
-					train_orders.remove_at(idx)
-				elif town.station == null:
-					_show_status("Town needs a station before it can be a stop")
-				else:
-					train_orders.append(town)
+			_toggle_order_stop(get_local_mouse_position())
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			if train_orders.size() > 0:
-				train_orders.pop_back()
+			_pop_order_stop()
 
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
@@ -262,6 +329,28 @@ func _handle_order_input(event: InputEvent) -> void:
 			KEY_SPACE:
 				editing_orders = false
 				_start_simulation()
+
+## Add or remove the clicked town as a train order stop. Each actual edit of
+## the order list is one undo step; the station-missing rejection is not.
+func _toggle_order_stop(pos: Vector2) -> void:
+	var town := _find_town_at(pos)
+	if town == null:
+		return
+	var idx := train_orders.find(town)
+	if idx >= 0:
+		_push_undo()
+		train_orders.remove_at(idx)
+	elif town.station == null:
+		_show_status("Town needs a station before it can be a stop")
+	else:
+		_push_undo()
+		train_orders.append(town)
+
+## Remove the last train order stop, as one undo step.
+func _pop_order_stop() -> void:
+	if train_orders.size() > 0:
+		_push_undo()
+		train_orders.pop_back()
 
 ## Show a transient status message below the hint text.
 func _show_status(msg: String) -> void:
@@ -279,6 +368,7 @@ func _find_town_at(pos: Vector2) -> Town:
 
 ## Place a town at a screen position. Towns are not part of the track graph.
 func _place_town(pos: Vector2) -> void:
+	_push_undo()
 	var col: Color = town_palette[next_color_index % town_palette.size()]
 	next_color_index += 1
 	towns.append(Town.new(pos, col))
@@ -559,7 +649,7 @@ func _draw_editor_overlay() -> void:
 				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
-		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | O to edit orders | [ ] cars: %d | R to reset" % car_count
+		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | U to undo | O to edit orders | [ ] cars: %d | R to reset" % car_count
 		if train_orders.size() >= 2 and network.segments.size() > 0:
 			hint += " | SPACE to start"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
@@ -636,7 +726,7 @@ func _draw_finish_angle_preview() -> void:
 
 ## Draw order editing overlay — hint text and route preview.
 func _draw_order_overlay() -> void:
-	var hint := "ORDERS: Click towns with stations to add/remove stops | RIGHT-CLICK to remove last | ESC/O to finish"
+	var hint := "ORDERS: Click towns with stations to add/remove stops | RIGHT-CLICK to remove last | U to undo | ESC/O to finish"
 	if train_orders.size() >= 2:
 		hint += " | SPACE to start simulation"
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
