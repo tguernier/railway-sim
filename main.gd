@@ -62,6 +62,26 @@ func _ready() -> void:
 	network = TrackNetwork.new()
 	editor = TrackEditor.new(network)
 
+## Reset the game to its initial editing state, discarding everything built.
+func _reset_game() -> void:
+	state = GameState.EDITING
+	towns = []
+	network = TrackNetwork.new()
+	editor = TrackEditor.new(network)
+	train = null
+	money = 1000.0
+	frame_count = 0
+	hovered_town = null
+	hovered_junction = null
+	editing_orders = false
+	placing_station = false
+	train_orders = []
+	car_count = 2
+	next_color_index = 0
+	status_message = ""
+	status_timer = 0.0
+	queue_redraw()
+
 ## Runs when there is an input event
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
@@ -69,6 +89,11 @@ func _input(event: InputEvent) -> void:
 		hovered_town = _find_town_at(mouse_pos)
 		hovered_junction = editor.find_junction_at(mouse_pos)
 		queue_redraw()
+		return
+
+	# R resets the whole game to the initial editing state from any phase.
+	if event is InputEventKey and event.pressed and event.keycode == KEY_R:
+		_reset_game()
 		return
 
 	if state == GameState.EDITING:
@@ -534,7 +559,7 @@ func _draw_editor_overlay() -> void:
 				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
-		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | O to edit orders | [ ] cars: %d" % car_count
+		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | O to edit orders | [ ] cars: %d | R to reset" % car_count
 		if train_orders.size() >= 2 and network.segments.size() > 0:
 			hint += " | SPACE to start"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
@@ -672,5 +697,5 @@ func _draw_train() -> void:
 ## Draw HUD.
 func _draw_hud() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-		"Money: %d | Cars: %d | On board: %d/%d" % [money, train.car_count,
+		"Money: %d | Cars: %d | On board: %d/%d | R to reset" % [money, train.car_count,
 			train.passengers_on_board, train.capacity])

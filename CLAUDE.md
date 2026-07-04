@@ -65,4 +65,5 @@ main.gd (Node2D)          — game state, input handling, all drawing (_draw)
 | Z | Undo last waypoint |
 | P | Place a station (click a track inside a town circle) |
 | O | Edit train orders (click towns with stations) |
+| R | Reset the game to the initial empty editing state (works in any phase) |
 | Space | Start simulation |
