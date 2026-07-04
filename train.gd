@@ -1,6 +1,15 @@
 ## A train that follows a route of track segments, carrying passengers between towns.
+## A train is a consist of cars: the head advances along the route while
+## trailing cars are sampled at fixed distances behind it.
 class_name Train
 extends RefCounted
+
+## Length of one car along the track, in pixels.
+const CAR_LENGTH := 26.0
+## Coupling gap between consecutive cars, in pixels.
+const CAR_GAP := 4.0
+## Passenger capacity of one car.
+const CAR_CAPACITY := 20
 
 ## Ordered list of track segments forming the current route. Array[TrackSegment]
 var route: Array = []
@@ -8,10 +17,16 @@ var route: Array = []
 var route_index: int = 0
 ## Progress along the current segment, from 0.0 (start) to 1.0 (end).
 var segment_progress: float = 0.0
+## Segments the head has fully traversed, oldest first — kept only as far back
+## as the tail needs so trailing cars can be positioned. Array[TrackSegment]
+var history: Array = []
+## Number of cars in the consist. The consist must fit within a platform.
+var car_count: int = 2
 ## Travel speed in pixels per second.
 var speed: float = 150.0
-## Maximum number of passengers the train can carry.
-var capacity: int = 40
+## Maximum number of passengers the train can carry (all cars combined).
+var capacity: int:
+	get: return car_count * CAR_CAPACITY
 ## Number of passengers currently aboard.
 var passengers_on_board: int = 0
 ## Set to true after the station stop on the current route leg is done.
@@ -29,13 +44,20 @@ var orders: Array[Town] = []
 ## Index into orders for the next stop the train is heading toward.
 var current_order_index: int = 0
 
-## Initialise a route.
+## Total length of the consist along the track, in pixels.
+func consist_length() -> float:
+	return car_count * CAR_LENGTH + (car_count - 1) * CAR_GAP
+
+## Initialise a route. Clears the path history: routes are set while the whole
+## consist sits on a platform segment (or at simulation start), and
+## resume_from_stop() re-anchors the train on that segment afterwards.
 ##
 ## new_route: Array[TrackSegment]
 func set_route(new_route: Array) -> void:
 	route = new_route
 	route_index = 0
 	segment_progress = 0.0
+	history = []
 	boarded_this_leg = false
 	stop_progress = -1.0
 
@@ -62,6 +84,7 @@ func move(delta: float) -> void:
 		var seg := current_segment()
 		if seg.length() <= 0.0:
 			if route_index < route.size() - 1:
+				history.append(seg)
 				route_index += 1
 				segment_progress = 0.0
 			else:
@@ -82,6 +105,7 @@ func move(delta: float) -> void:
 			if is_stop:
 				break  # arrived at the platform stop
 			if route_index < route.size() - 1:
+				history.append(seg)
 				route_index += 1
 				segment_progress = 0.0
 			else:
@@ -89,6 +113,7 @@ func move(delta: float) -> void:
 		else:
 			segment_progress += distance / seg.length()
 			distance = 0.0
+	_trim_history()
 
 ## Check if train has fully progressed along a track segment.
 func has_completed_route() -> bool:
@@ -100,19 +125,55 @@ func at_pending_stop() -> bool:
 		and route_index == route.size() - 1 and segment_progress >= stop_progress
 
 ## Resume a freshly set route from a station stop. prev_seg / prev_progress
-## describe where the train was stopped; reverse_seg is the opposite-direction
-## twin of prev_seg. If the new route leaves along reverse_seg (a dead-end
-## station) the train turns around in place — same point, opposite heading —
-## otherwise prev_seg is prepended so the train first rolls forward through
-## its remainder before joining the new route.
+## describe where the train's head was stopped; reverse_seg is the
+## opposite-direction twin of prev_seg. If the new route leaves along
+## reverse_seg (a dead-end station) the train turns around: the head takes the
+## old tail's spot heading the other way, so the consist occupies the same
+## physical span reversed. Otherwise prev_seg is prepended so the train first
+## rolls forward through its remainder before joining the new route. Either
+## way the whole consist lies on a single known segment afterwards (stops
+## always leave the consist entirely on the platform segment).
 func resume_from_stop(prev_seg: TrackSegment, prev_progress: float, reverse_seg: TrackSegment) -> void:
 	if route.size() == 0:
 		return
 	if route[0] == reverse_seg:
-		segment_progress = 1.0 - prev_progress
+		var back := consist_length() / prev_seg.length() if prev_seg.length() > 0.0 else 0.0
+		segment_progress = clampf(1.0 - (prev_progress - back), 0.0, 1.0)
 	else:
 		route.insert(0, prev_seg)
 		segment_progress = prev_progress
+
+## Position and heading at a point back_offset px behind the head, walking
+## back through the current segment and then the history. Clamps at the
+## oldest known point, so cars compress there rather than leaving the track
+## (only happens transiently right after a route is seeded).
+func point_behind(back_offset: float) -> Transform2D:
+	var seg := current_segment()
+	if seg == null:
+		return Transform2D(0.0, Vector2.ZERO)
+	var remaining := back_offset
+	# Distance of the head into the current segment.
+	var available := segment_progress * seg.length()
+	var idx := history.size()
+	while remaining > available and idx > 0:
+		remaining -= available
+		idx -= 1
+		seg = history[idx]
+		available = seg.length()
+	var dist := available - minf(remaining, available)
+	var t := dist / seg.length() if seg.length() > 0.0 else 0.0
+	return Transform2D(seg.angle_at(t), seg.position_at(t))
+
+## Drop history segments the tail can no longer reach.
+func _trim_history() -> void:
+	var seg := current_segment()
+	var behind := segment_progress * seg.length() if seg != null else 0.0
+	var keep_from := history.size()
+	while keep_from > 0 and behind < consist_length():
+		keep_from -= 1
+		behind += history[keep_from].length()
+	if keep_from > 0:
+		history = history.slice(keep_from)
 
 ## Get current train position.
 func current_position() -> Vector2:

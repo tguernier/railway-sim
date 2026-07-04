@@ -33,6 +33,12 @@ func run_all() -> void:
 	_t("current_order_town_returns_correct_stop", _test_current_order_town)
 	_t("advance_order_cycles", _test_advance_order_cycles)
 	_t("advance_order_wraps_around", _test_advance_order_wraps)
+	_t("consist_length_and_capacity_scale_with_cars", _test_consist_length_capacity)
+	_t("history_keeps_segments_the_tail_needs", _test_history_trim)
+	_t("point_behind_spans_segment_boundary", _test_point_behind_spans)
+	_t("point_behind_clamps_at_oldest_point", _test_point_behind_clamps)
+	_t("set_route_clears_history", _test_set_route_clears_history)
+	_t("resume_forward_keeps_tail_continuous", _test_resume_forward_tail)
 
 func _test_no_route() -> void:
 	var tr := Train.new()
@@ -105,20 +111,25 @@ func _test_move_advances() -> void:
 	gt(tr.segment_progress, 0.0)
 
 func _test_resume_turnaround() -> void:
-	# Stopped at 0.3 along the platform; the new route leaves along the
-	# reverse twin, so the train flips in place to the mirrored point.
+	# Head stopped at 0.3 along the platform; the new route leaves along the
+	# reverse twin, so the train turns around: the head takes the old tail's
+	# spot heading the other way (same physical span, reversed).
 	var a := _node(0, 0)
 	var b := _node(500, 0)
 	var fwd := _seg(a, b)
 	var rev := _seg(b, a)
 	var out := _seg(a, _node(-500, 0))
 	var tr := Train.new()
+	tr.car_count = 2  # consist length 56
 	tr.set_route([rev, out])
 	tr.resume_from_stop(fwd, 0.3, rev)
 	eq(tr.route.size(), 2)  # nothing prepended
 	eq(tr.current_segment(), rev)
-	approx(tr.segment_progress, 0.7, 0.0001)
-	approx(tr.current_position().x, 150.0, 1.0)  # same spot, other direction
+	# Old head at x=150, old tail at x=94; new head is the mirrored tail.
+	approx(tr.segment_progress, 1.0 - (0.3 - tr.consist_length() / 500.0), 0.0001)
+	approx(tr.current_position().x, 150.0 - tr.consist_length(), 1.0)
+	# The new tail sits where the old head was.
+	approx(tr.point_behind(tr.consist_length()).origin.x, 150.0, 1.0)
 
 func _test_resume_forward() -> void:
 	# The new route continues past the platform end, so the platform segment
@@ -207,3 +218,76 @@ func _test_advance_order_wraps() -> void:
 	tr.advance_order()
 	eq(tr.current_order_index, 0)
 	eq(tr.current_order_town(), a)
+
+func _test_consist_length_capacity() -> void:
+	var tr := Train.new()
+	tr.car_count = 1
+	approx(tr.consist_length(), Train.CAR_LENGTH, 0.001)
+	eq(tr.capacity, Train.CAR_CAPACITY)
+	tr.car_count = 2
+	approx(tr.consist_length(), 2 * Train.CAR_LENGTH + Train.CAR_GAP, 0.001)
+	eq(tr.capacity, 2 * Train.CAR_CAPACITY)
+	tr.car_count = 4
+	approx(tr.consist_length(), 4 * Train.CAR_LENGTH + 3 * Train.CAR_GAP, 0.001)
+	eq(tr.capacity, 4 * Train.CAR_CAPACITY)
+
+## Three 100 px segments in a line; a 2-car consist is 56 px long.
+func _route_of_three(tr: Train) -> Array:
+	var segs := [
+		_seg(_node(0, 0), _node(100, 0)),
+		_seg(_node(100, 0), _node(200, 0)),
+		_seg(_node(200, 0), _node(300, 0)),
+	]
+	tr.car_count = 2
+	tr.set_route(segs)
+	return segs
+
+func _test_history_trim() -> void:
+	var tr := Train.new()
+	var segs := _route_of_three(tr)
+	tr.move(1.0)  # 150 px: head halfway into the second segment
+	eq(tr.route_index, 1)
+	# Only 50 px of the current segment is behind the head — the 56 px
+	# consist still needs the first segment.
+	eq(tr.history.size(), 1)
+	eq(tr.history[0], segs[0])
+	tr.move(1.0)  # 300 px total: route complete, 100 px behind the head
+	is_true(tr.has_completed_route())
+	eq(tr.history.size(), 0)  # tail fits on the final segment alone
+
+func _test_point_behind_spans() -> void:
+	var tr := Train.new()
+	var _segs := _route_of_three(tr)
+	tr.move(1.0)  # head at x=150
+	approx(tr.point_behind(0.0).origin.x, 150.0, 1.0)
+	approx(tr.point_behind(13.0).origin.x, 137.0, 1.0)
+	approx(tr.point_behind(100.0).origin.x, 50.0, 1.0)  # back on segment 1
+
+func _test_point_behind_clamps() -> void:
+	var tr := Train.new()
+	tr.set_route([_seg(_node(0, 0), _node(100, 0))])
+	# No history and the head at the very start: everything clamps to x=0.
+	approx(tr.point_behind(50.0).origin.x, 0.0, 0.001)
+
+func _test_set_route_clears_history() -> void:
+	var tr := Train.new()
+	var _segs := _route_of_three(tr)
+	tr.move(1.0)
+	eq(tr.history.size(), 1)
+	tr.set_route([_seg(_node(0, 0), _node(100, 0))])
+	eq(tr.history.size(), 0)
+
+func _test_resume_forward_tail() -> void:
+	# Roll-forward departure: the platform segment is prepended, so the tail
+	# trails behind the head on the same segment with no discontinuity.
+	var a := _node(0, 0)
+	var b := _node(500, 0)
+	var platform_seg := _seg(a, b)
+	var rev := _seg(b, a)
+	var onward := _seg(b, _node(1000, 0))
+	var tr := Train.new()
+	tr.car_count = 2
+	tr.set_route([onward])
+	tr.resume_from_stop(platform_seg, 0.5, rev)
+	approx(tr.current_position().x, 250.0, 1.0)
+	approx(tr.point_behind(tr.consist_length()).origin.x, 250.0 - tr.consist_length(), 1.0)

@@ -31,6 +31,8 @@ var editing_orders := false
 var placing_station := false
 ## The train's ordered stop list, built before simulation starts.
 var train_orders: Array[Town] = []
+## Number of cars for the train, chosen in edit mode ([ / ] keys).
+var car_count := 2
 ## Transient status/error message shown below the hint text.
 var status_message := ""
 ## Seconds remaining before the status message disappears.
@@ -51,6 +53,8 @@ const WAYPOINT_RADIUS := 5.0
 const JUNCTION_RADIUS := 8.0
 ## How long status messages stay on screen, in seconds.
 const STATUS_DURATION := 3.0
+## Price of each train car beyond the first, charged at simulation start.
+const COST_PER_CAR := 150.0
 
 ## Runs when the node is ready
 func _ready() -> void:
@@ -104,6 +108,10 @@ func _handle_edit_input(event: InputEvent) -> void:
 			KEY_P:
 				if not editor.drawing:
 					placing_station = true
+			KEY_BRACKETLEFT:
+				car_count = maxi(car_count - 1, 1)
+			KEY_BRACKETRIGHT:
+				car_count = mini(car_count + 1, _max_car_count())
 
 ## Handles a left-click while a track is being drawn.
 func _handle_draw_click(click_pos: Vector2, shift: bool) -> void:
@@ -264,15 +272,25 @@ func _start_simulation() -> void:
 	if unroutable != -1:
 		_show_status("No track route to stop %d — connect it to the other stops" % (unroutable + 1))
 		return
+	var car_cost := (car_count - 1) * COST_PER_CAR
+	if money < car_cost:
+		_show_status("Not enough money for %d cars (extra cars cost %d each)" % [car_count, int(COST_PER_CAR)])
+		return
+	money -= car_cost
 	state = GameState.SIMULATING
 	editing_orders = false
 	placing_station = false
 	train = Train.new()
+	train.car_count = car_count
 	train.orders = train_orders.duplicate()
 	train.current_order_index = 0
-	# The train starts at the far end of the first stop's platform.
+	# The train starts parked at the first stop's platform, as if it had just
+	# finished a stop there — same anchoring as a departure.
 	var start_platform: Platform = train_orders[0].station.platforms[0]
 	_dispatch_to_next_order(start_platform.segment.node_end)
+	if train != null and train.has_route():
+		train.resume_from_stop(start_platform.segment,
+			_stop_point(start_platform.segment), start_platform.reverse_segment)
 
 ## Dispatch the train toward its next order stop's platform via Dijkstra.
 ## Orders are validated before the simulation starts, but a leg can still
@@ -287,10 +305,24 @@ func _dispatch_to_next_order(from_node: NetworkNode) -> void:
 	var route := network.find_route_to_platform(from_node, target.station.platforms[0])
 	if route.size() > 0:
 		train.set_route(route)
-		# The route ends with the platform traversal — call at its middle.
-		train.stop_progress = 0.5
+		# The route ends with the platform traversal — halt the head so the
+		# consist is centered on the platform.
+		train.stop_progress = _stop_point(route[-1])
 	else:
 		_stop_simulation("No track route to the next stop — simulation stopped")
+
+## Head halt point (progress) on a platform segment that centers the consist
+## on the platform. Consists always fit: car count is capped to the platform
+## length, so the whole train sits on the platform segment while dwelling.
+func _stop_point(platform_seg: TrackSegment) -> float:
+	var total := platform_seg.length()
+	if total <= 0.0:
+		return 1.0
+	return clampf(0.5 + train.consist_length() / (2.0 * total), 0.0, 1.0)
+
+## Largest consist size that fits within a station platform.
+func _max_car_count() -> int:
+	return int((TrackEditor.PLATFORM_LENGTH + Train.CAR_GAP) / (Train.CAR_LENGTH + Train.CAR_GAP))
 
 ## Halt the simulation and return to editing mode.
 func _stop_simulation(msg: String) -> void:
@@ -502,9 +534,9 @@ func _draw_editor_overlay() -> void:
 				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
-		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | O to edit orders"
+		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | O to edit orders | [ ] cars: %d" % car_count
 		if train_orders.size() >= 2 and network.segments.size() > 0:
-			hint += " | SPACE to start simulation"
+			hint += " | SPACE to start"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
 
 ## Draw the track preview colored by curvature (green = OK, red = too tight).
@@ -615,22 +647,30 @@ func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: fl
 		var a0 := TAU * float(i) / float(dashes)
 		draw_arc(center, radius, a0, a0 + TAU / float(dashes) * 0.6, 4, color, width)
 
-## Draw train.
+## Draw the train as a chain of cars, each sampled at its own point along the
+## track so the consist bends with the curves.
 func _draw_train() -> void:
-	var train_pos := train.current_position()
-	var train_angle := train.current_angle()
-	draw_set_transform(train_pos, train_angle)
-	draw_rect(Rect2(-20, -7, 40, 14), Color.DIM_GRAY)
-	draw_circle(Vector2(18, 0), 2.0, Color.YELLOW)
-	draw_circle(Vector2(-18, 0), 2.0, Color.RED)
+	var half := Train.CAR_LENGTH / 2.0
+	for i in range(train.car_count):
+		var back := i * (Train.CAR_LENGTH + Train.CAR_GAP) + half
+		var xf := train.point_behind(back)
+		draw_set_transform(xf.origin, xf.get_rotation())
+		draw_rect(Rect2(-half + 1, -7, Train.CAR_LENGTH - 2, 14),
+			Color.DARK_SLATE_GRAY if i == 0 else Color.DIM_GRAY)
+		if i == 0:
+			draw_circle(Vector2(half - 3, 0), 2.0, Color.YELLOW)
+		if i == train.car_count - 1:
+			draw_circle(Vector2(-half + 3, 0), 2.0, Color.RED)
 	draw_set_transform(Vector2.ZERO, 0)
-	draw_string(ThemeDB.fallback_font, train_pos + Vector2(-20, -15),
+	var head_pos := train.current_position()
+	draw_string(ThemeDB.fallback_font, head_pos + Vector2(-20, -15),
 		"%d" % train.passengers_on_board)
 	if train.dwell_remaining > 0.0:
-		draw_string(ThemeDB.fallback_font, train_pos + Vector2(-30, 28),
+		draw_string(ThemeDB.fallback_font, head_pos + Vector2(-30, 28),
 			"Boarding...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.WHITE)
 
 ## Draw HUD.
 func _draw_hud() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-		"Money: %d | On board: %d" % [money, train.passengers_on_board])
+		"Money: %d | Cars: %d | On board: %d/%d" % [money, train.car_count,
+			train.passengers_on_board, train.capacity])

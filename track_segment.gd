@@ -16,6 +16,13 @@ var platform: Platform:
 	get: return _platform_ref.get_ref() as Platform if _platform_ref != null else null
 	set(p): _platform_ref = weakref(p) if p != null else null
 
+## The opposite-direction twin of this segment (same physical track). Stored as
+## a weak reference to avoid cycles between the pair. Null for one-way track.
+var _reverse_ref: WeakRef = null
+var reverse: TrackSegment:
+	get: return _reverse_ref.get_ref() as TrackSegment if _reverse_ref != null else null
+	set(s): _reverse_ref = weakref(s) if s != null else null
+
 ## Whether this segment is occupied by a station platform.
 func is_platform_segment() -> bool:
 	return platform != null

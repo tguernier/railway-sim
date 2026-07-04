@@ -178,13 +178,18 @@ func cancel() -> void:
 
 # --- Track operations ---
 
-## Create a bidirectional track between two network nodes.
+## Create a bidirectional track between two network nodes. The two segments
+## are linked as each other's reverse twin.
 func create_bidirectional_track(from: NetworkNode, to: NetworkNode, wps: Array[Vector2]) -> void:
-	network.add_segment(TrackSegment.new(from, to, wps))
+	var fwd := TrackSegment.new(from, to, wps)
 	var reversed_wp: Array[Vector2] = []
 	for i in range(wps.size() - 1, -1, -1):
 		reversed_wp.append(wps[i])
-	network.add_segment(TrackSegment.new(to, from, reversed_wp))
+	var rev := TrackSegment.new(to, from, reversed_wp)
+	fwd.reverse = rev
+	rev.reverse = fwd
+	network.add_segment(fwd)
+	network.add_segment(rev)
 
 ## Split an existing track at a hit point, creating a junction. Returns the new
 ## junction node, or null if the segment is a station platform.
@@ -199,7 +204,7 @@ func split_track_at_hit(hit: Array) -> NetworkNode:
 	var junction := NetworkNode.junction(split_pos)
 	network.add_node(junction)
 
-	var reverse := find_reverse_segment(seg)
+	var reverse := seg.reverse
 
 	var wp_first := _sample_curve_waypoints(seg, 0.0, t)
 	var wp_second := _sample_curve_waypoints(seg, t, 1.0)
@@ -224,7 +229,7 @@ func try_delete_track_at(pos: Vector2) -> void:
 		last_error = "Remove the station before deleting its platform track"
 		return
 	last_error = ""
-	var reverse := find_reverse_segment(seg)
+	var reverse := seg.reverse
 	network.remove_segment(seg)
 	if reverse != null:
 		network.remove_segment(reverse)
@@ -307,7 +312,7 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 		return null
 
 	# Replace the hit segment with approach tracks + the platform pair.
-	var reverse := find_reverse_segment(seg)
+	var reverse := seg.reverse
 	network.remove_segment(seg)
 	if reverse != null:
 		network.remove_segment(reverse)
@@ -319,6 +324,8 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 	for i in range(platform_wps.size() - 1, -1, -1):
 		reversed_wps.append(platform_wps[i])
 	var platform_rev := TrackSegment.new(exit, entry, reversed_wps)
+	platform_seg.reverse = platform_rev
+	platform_rev.reverse = platform_seg
 	network.add_segment(platform_seg)
 	network.add_segment(platform_rev)
 
@@ -377,13 +384,6 @@ func find_track_at(pos: Vector2) -> Array:
 	if best_seg != null:
 		return [best_seg, best_t]
 	return []
-
-## Find the reverse of a segment (same endpoints, opposite direction).
-func find_reverse_segment(seg: TrackSegment) -> TrackSegment:
-	for s in network.segments:
-		if s.node_start == seg.node_end and s.node_end == seg.node_start:
-			return s
-	return null
 
 # --- Internal helpers ---
 

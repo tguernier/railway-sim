@@ -28,7 +28,9 @@ func run_all() -> void:
 	_t("find_junction_at_miss", _test_find_junction_miss)
 	_t("find_track_at_found", _test_find_track_found)
 	_t("find_track_at_miss", _test_find_track_miss)
-	_t("find_reverse_segment", _test_find_reverse)
+	_t("reverse_linked_on_create", _test_reverse_linked_on_create)
+	_t("reverse_linked_on_split", _test_reverse_linked_on_split)
+	_t("reverse_linked_on_place_station", _test_reverse_linked_on_station)
 	_t("try_delete_track_at", _test_delete_track)
 	_t("split_track_at_hit", _test_split_track)
 	_t("finish_rejects_tight_curve", _test_finish_rejects_tight)
@@ -153,13 +155,41 @@ func _test_find_track_miss() -> void:
 	var hit := ed.find_track_at(Vector2(100, 100))
 	eq(hit.size(), 0)
 
-func _test_find_reverse() -> void:
+func _test_reverse_linked_on_create() -> void:
 	var ed := _editor()
 	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
 	var fwd := ed.network.segments[0]
-	var rev := ed.find_reverse_segment(fwd)
+	var rev := ed.network.segments[1]
+	eq(fwd.reverse, rev)
+	eq(rev.reverse, fwd)
 	eq(rev.node_start, fwd.node_end)
 	eq(rev.node_end, fwd.node_start)
+
+func _test_reverse_linked_on_split() -> void:
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(200, 0), [])
+	var hit := ed.find_track_at(Vector2(100, 0))
+	ed.split_track_at_hit(hit)
+	eq(ed.network.segments.size(), 4)
+	for seg in ed.network.segments:
+		is_true(seg.reverse != null)
+		eq(seg.reverse.node_start, seg.node_end)
+		eq(seg.reverse.node_end, seg.node_start)
+		eq(seg.reverse.reverse, seg)
+
+func _test_reverse_linked_on_station() -> void:
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(400, 0), [])
+	var town := Town.new(Vector2(200, 30), Color.WHITE)
+	var station := ed.place_station(Vector2(200, 0), [town])
+	is_true(station != null)
+	var platform: Platform = station.platforms[0]
+	eq(platform.segment.reverse, platform.reverse_segment)
+	eq(platform.reverse_segment.reverse, platform.segment)
+	# Approach segments created around the platform are linked too.
+	for seg in ed.network.segments:
+		is_true(seg.reverse != null)
+		eq(seg.reverse.reverse, seg)
 
 func _test_delete_track() -> void:
 	var ed := _editor()
