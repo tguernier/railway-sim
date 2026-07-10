@@ -1,7 +1,8 @@
-## A deep copy of the editable world state (towns, network, train orders),
+## A deep copy of the editable world state (towns, network, train roster),
 ## used as an entry on the undo stack. Capture before a build action; restore
 ## swaps the cloned objects in as the live state. Money, game state, and the
-## train are deliberately not snapshotted — undo is an editing-mode tool.
+## running trains are deliberately not snapshotted — undo is an editing-mode
+## tool.
 class_name GameSnapshot
 extends RefCounted
 
@@ -9,8 +10,13 @@ extends RefCounted
 var towns: Array[Town] = []
 ## Cloned track network.
 var network: TrackNetwork
-## Train orders, as references into the cloned towns.
-var train_orders: Array[Town] = []
+## Cloned per-train plans (orders point into the cloned towns).
+var roster: Array[TrainPlan] = []
+## Index of the roster train that was selected for editing.
+var selected_train := 0
+## Orders of the selected plan — mirrors main.train_orders.
+var train_orders: Array[Town]:
+	get: return roster[selected_train].orders
 ## Palette index for the next town placed.
 var next_color_index := 0
 
@@ -68,8 +74,13 @@ static func capture(main) -> GameSnapshot:
 		town_map[town] = town_clone
 		snap.towns.append(town_clone)
 
-	for town in main.train_orders:
-		snap.train_orders.append(town_map[town])
+	for plan in main.roster:
+		var plan_clone := TrainPlan.new()
+		plan_clone.car_count = plan.car_count
+		for town in plan.orders:
+			plan_clone.orders.append(town_map[town])
+		snap.roster.append(plan_clone)
+	snap.selected_train = main.selected_train
 	snap.next_color_index = main.next_color_index
 	return snap
 
@@ -79,7 +90,8 @@ static func capture(main) -> GameSnapshot:
 func restore(main) -> void:
 	main.towns = towns
 	main.network = network
-	main.train_orders = train_orders
+	main.roster = roster
+	main.selected_train = selected_train
 	main.next_color_index = next_color_index
 	main.editor.network = network
 	# Hover references point into the discarded world; the next mouse motion

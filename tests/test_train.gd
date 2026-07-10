@@ -39,6 +39,17 @@ func run_all() -> void:
 	_t("point_behind_clamps_at_oldest_point", _test_point_behind_clamps)
 	_t("set_route_clears_history", _test_set_route_clears_history)
 	_t("resume_forward_keeps_tail_continuous", _test_resume_forward_tail)
+	_t("try_reserve_marks_segments", _test_reserve_marks)
+	_t("try_reserve_atomic_all_or_nothing", _test_reserve_atomic)
+	_t("reserve_blocks_reverse_twin", _test_reserve_blocks_twin)
+	_t("own_twin_is_not_blocked", _test_own_twin_ok)
+	_t("re_reserve_is_idempotent", _test_reserve_idempotent)
+	_t("release_all_frees_segments", _test_release_all)
+	_t("set_route_releases_reservations", _test_set_route_releases)
+	_t("tail_clear_releases_segments", _test_tail_clear_release)
+	_t("blocked_entry_halts_at_boundary", _test_blocked_entry_halts)
+	_t("blocked_entry_proceeds_after_release", _test_blocked_entry_proceeds)
+	_t("turnaround_keeps_span_held", _test_turnaround_keeps_held)
 
 func _test_no_route() -> void:
 	var tr := Train.new()
@@ -276,6 +287,131 @@ func _test_set_route_clears_history() -> void:
 	eq(tr.history.size(), 1)
 	tr.set_route([_seg(_node(0, 0), _node(100, 0))])
 	eq(tr.history.size(), 0)
+
+## A linked forward/reverse segment pair between two nodes.
+func _twin_pair(a: NetworkNode, b: NetworkNode) -> Array:
+	var fwd := _seg(a, b)
+	var rev := _seg(b, a)
+	fwd.reverse = rev
+	rev.reverse = fwd
+	return [fwd, rev]
+
+func _test_reserve_marks() -> void:
+	var tr := Train.new()
+	var s1 := _seg(_node(0, 0), _node(100, 0))
+	var s2 := _seg(_node(100, 0), _node(200, 0))
+	is_true(tr.try_reserve([s1, s2]))
+	eq(s1.reserved_by, tr)
+	eq(s2.reserved_by, tr)
+	eq(tr.reserved.size(), 2)
+
+func _test_reserve_atomic() -> void:
+	var tr := Train.new()
+	var other := Train.new()
+	var s1 := _seg(_node(0, 0), _node(100, 0))
+	var s2 := _seg(_node(100, 0), _node(200, 0))
+	is_true(other.try_reserve([s2]))
+	is_false(tr.try_reserve([s1, s2]))
+	eq(s1.reserved_by, null)  # nothing was taken
+	eq(tr.reserved.size(), 0)
+
+func _test_reserve_blocks_twin() -> void:
+	var other := Train.new()
+	var pair := _twin_pair(_node(0, 0), _node(100, 0))
+	is_true(other.try_reserve([pair[0]]))
+	var tr := Train.new()
+	is_false(tr.try_reserve([pair[1]]))
+
+func _test_own_twin_ok() -> void:
+	var tr := Train.new()
+	var pair := _twin_pair(_node(0, 0), _node(100, 0))
+	is_true(tr.try_reserve([pair[0]]))
+	is_true(tr.try_reserve([pair[1]]))
+
+func _test_reserve_idempotent() -> void:
+	var tr := Train.new()
+	var s := _seg(_node(0, 0), _node(100, 0))
+	is_true(tr.try_reserve([s]))
+	is_true(tr.try_reserve([s]))
+	eq(tr.reserved.size(), 1)
+
+func _test_release_all() -> void:
+	var tr := Train.new()
+	var s1 := _seg(_node(0, 0), _node(100, 0))
+	var s2 := _seg(_node(100, 0), _node(200, 0))
+	tr.try_reserve([s1, s2])
+	tr.release_all()
+	eq(s1.reserved_by, null)
+	eq(tr.reserved.size(), 0)
+	var other := Train.new()
+	is_true(other.try_reserve([s1]))
+
+func _test_set_route_releases() -> void:
+	var tr := Train.new()
+	var s := _seg(_node(0, 0), _node(100, 0))
+	tr.try_reserve([s])
+	tr.set_route([_seg(_node(0, 0), _node(200, 0))])
+	eq(s.reserved_by, null)
+	eq(tr.reserved.size(), 0)
+
+func _test_tail_clear_release() -> void:
+	var tr := Train.new()
+	var segs := _route_of_three(tr)  # 3 × 100 px, 2-car consist (56 px)
+	tr.try_reserve([segs[0]])  # seed the footprint like dispatch does
+	tr.move(1.0)  # head at x=150: tail at 94, still on the first segment
+	eq(segs[0].reserved_by, tr)
+	eq(segs[1].reserved_by, tr)  # entered via the movement gate
+	tr.move(1.0)  # head at x=300: the tail cleared segments 1 and 2
+	eq(segs[0].reserved_by, null)
+	eq(segs[1].reserved_by, null)
+	eq(segs[2].reserved_by, tr)
+	eq(tr.reserved, [segs[2]])
+
+func _test_blocked_entry_halts() -> void:
+	var tr := Train.new()
+	var other := Train.new()
+	var s1 := _seg(_node(0, 0), _node(100, 0))
+	var s2 := _seg(_node(100, 0), _node(200, 0))
+	other.try_reserve([s2])
+	tr.set_route([s1, s2])
+	tr.try_reserve([s1])
+	tr.move(1.0)  # 150 px — enough to overshoot the boundary
+	eq(tr.route_index, 0)
+	eq(tr.segment_progress, 1.0)  # halted at the segment end
+	is_true(tr.waiting_for_track)
+	is_false(tr.has_completed_route())
+
+func _test_blocked_entry_proceeds() -> void:
+	var tr := Train.new()
+	var other := Train.new()
+	var s1 := _seg(_node(0, 0), _node(100, 0))
+	var s2 := _seg(_node(100, 0), _node(200, 0))
+	other.try_reserve([s2])
+	tr.set_route([s1, s2])
+	tr.try_reserve([s1])
+	tr.move(1.0)  # blocked at the boundary
+	other.release_all()
+	tr.move(1.0)  # the retry succeeds and the train rolls on
+	is_false(tr.waiting_for_track)
+	is_true(tr.has_completed_route())
+	eq(s2.reserved_by, tr)
+
+func _test_turnaround_keeps_held() -> void:
+	# Dead-end departure: the consist swaps from the platform segment to its
+	# reverse twin; the physical span must stay barred to other trains.
+	var a := _node(0, 0)
+	var b := _node(500, 0)
+	var pair := _twin_pair(a, b)
+	var out := _seg(a, _node(-500, 0))
+	var tr := Train.new()
+	tr.car_count = 2
+	tr.try_reserve([pair[0]])  # parked on the platform segment
+	tr.set_route([pair[1], out])  # releases, as dispatch does
+	tr.resume_from_stop(pair[0], 0.3, pair[1])
+	is_true(tr.try_reserve([tr.current_segment()]))  # re-take the twin
+	eq(pair[1].reserved_by, tr)
+	var other := Train.new()
+	is_false(other.try_reserve([pair[0]]))  # twin exclusion holds the span
 
 func _test_resume_forward_tail() -> void:
 	# Roll-forward departure: the platform segment is prepended, so the tail

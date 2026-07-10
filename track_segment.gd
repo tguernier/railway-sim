@@ -23,6 +23,14 @@ var reverse: TrackSegment:
 	get: return _reverse_ref.get_ref() as TrackSegment if _reverse_ref != null else null
 	set(s): _reverse_ref = weakref(s) if s != null else null
 
+## The train currently holding a movement reservation on this segment. Stored
+## as a weak reference to avoid cycles (trains hold their reserved segments
+## strongly). Null when the segment is free.
+var _reserved_by_ref: WeakRef = null
+var reserved_by: Train:
+	get: return _reserved_by_ref.get_ref() as Train if _reserved_by_ref != null else null
+	set(t): _reserved_by_ref = weakref(t) if t != null else null
+
 ## Whether this segment is occupied by a station platform.
 func is_platform_segment() -> bool:
 	return platform != null

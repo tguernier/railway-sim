@@ -11,6 +11,7 @@ func _initialize() -> void:
 		TestTrackEditor.new(),
 		TestStation.new(),
 		TestTrain.new(),
+		TestMultiTrain.new(),
 		TestGameSnapshot.new(),
 		TestUndo.new(),
 	]

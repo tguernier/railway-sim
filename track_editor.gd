@@ -239,11 +239,13 @@ func try_delete_track_at(pos: Vector2) -> bool:
 	return true
 
 ## Remove a town from the map. Towns are not graph nodes, so this only needs
-## to tear down the town's station (if any) and drop it from the lists.
-func remove_town(town: Town, towns: Array[Town], train_orders: Array[Town]) -> void:
+## to tear down the town's station (if any) and drop it from the town list
+## and every train's order list (order_lists: one Array[Town] per train).
+func remove_town(town: Town, towns: Array[Town], order_lists: Array = []) -> void:
 	remove_station(town)
 	towns.erase(town)
-	train_orders.erase(town)
+	for orders in order_lists:
+		orders.erase(town)
 
 ## Remove a town's station: delete its platform segments and clean up the
 ## entry/exit junctions if nothing else connects to them.

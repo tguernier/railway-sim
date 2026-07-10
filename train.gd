@@ -38,6 +38,11 @@ var dwell_remaining: float = 0.0
 ## Progress on the final route segment where the train halts for its station
 ## stop (the middle of the platform). -1 when no stop is pending.
 var stop_progress: float = -1.0
+## Segments this train holds movement reservations on. Array[TrackSegment]
+var reserved: Array = []
+## True while the train is halted because the next route segment is held by
+## another train (retried every move).
+var waiting_for_track := false
 
 ## Ordered list of town stops the train visits in a loop. Array[Town]
 var orders: Array[Town] = []
@@ -54,12 +59,14 @@ func consist_length() -> float:
 ##
 ## new_route: Array[TrackSegment]
 func set_route(new_route: Array) -> void:
+	release_all()
 	route = new_route
 	route_index = 0
 	segment_progress = 0.0
 	history = []
 	boarded_this_leg = false
 	stop_progress = -1.0
+	waiting_for_track = false
 
 ## Check if the train has a route.
 func has_route() -> bool:
@@ -72,21 +79,24 @@ func current_segment() -> TrackSegment:
 	return null
 
 ## Move train along a track segment. While dwelling at a station the train
-## stays put and the dwell timer counts down instead.
+## stays put and the dwell timer counts down instead. The head only advances
+## onto the next route segment once its reservation is taken; a segment held
+## by another train halts the head at the boundary, retried on every move.
 func move(delta: float) -> void:
 	if dwell_remaining > 0.0:
 		dwell_remaining = maxf(dwell_remaining - delta, 0.0)
 		return
 	if not has_route():
 		return
+	waiting_for_track = false
 	var distance := speed * delta
 	while distance > 0.0 and not has_completed_route():
 		var seg := current_segment()
 		if seg.length() <= 0.0:
 			if route_index < route.size() - 1:
-				history.append(seg)
-				route_index += 1
-				segment_progress = 0.0
+				if not _advance_to_next_segment(seg):
+					segment_progress = 1.0
+					break
 			else:
 				segment_progress = 1.0
 				break
@@ -105,15 +115,26 @@ func move(delta: float) -> void:
 			if is_stop:
 				break  # arrived at the platform stop
 			if route_index < route.size() - 1:
-				history.append(seg)
-				route_index += 1
-				segment_progress = 0.0
+				if not _advance_to_next_segment(seg):
+					break
 			else:
 				break
 		else:
 			segment_progress += distance / seg.length()
 			distance = 0.0
 	_trim_history()
+
+## Advance the head onto the next route segment if its reservation can be
+## taken; otherwise flag the train as waiting for track. The traversed segment
+## moves into the history so trailing cars can still be positioned on it.
+func _advance_to_next_segment(seg: TrackSegment) -> bool:
+	if not try_reserve([route[route_index + 1]]):
+		waiting_for_track = true
+		return false
+	history.append(seg)
+	route_index += 1
+	segment_progress = 0.0
+	return true
 
 ## Check if train has fully progressed along a track segment.
 func has_completed_route() -> bool:
@@ -164,7 +185,8 @@ func point_behind(back_offset: float) -> Transform2D:
 	var t := dist / seg.length() if seg.length() > 0.0 else 0.0
 	return Transform2D(seg.angle_at(t), seg.position_at(t))
 
-## Drop history segments the tail can no longer reach.
+## Drop history segments the tail can no longer reach, releasing their track
+## reservations — the tail clearing a segment is exactly when it frees up.
 func _trim_history() -> void:
 	var seg := current_segment()
 	var behind := segment_progress * seg.length() if seg != null else 0.0
@@ -173,7 +195,21 @@ func _trim_history() -> void:
 		keep_from -= 1
 		behind += history[keep_from].length()
 	if keep_from > 0:
+		var dropped := history.slice(0, keep_from)
 		history = history.slice(keep_from)
+		for cleared in dropped:
+			if not _still_occupies(cleared):
+				release(cleared)
+
+## Whether a segment is still under or ahead of the train — a looping route
+## can revisit a segment, so a copy dropped from history must not release it.
+func _still_occupies(seg: TrackSegment) -> bool:
+	if history.has(seg):
+		return true
+	for i in range(route_index, route.size()):
+		if route[i] == seg:
+			return true
+	return false
 
 ## Get current train position.
 func current_position() -> Vector2:
@@ -210,3 +246,40 @@ func unload() -> int:
 ## Pickup passengers onto train.
 func board_from(town: Town) -> void:
 	passengers_on_board = town.pickup_passengers(capacity)
+
+# --- Track reservations ---
+
+## Reserve every segment for this train, all-or-nothing: if any segment (or
+## its reverse twin) is held by another train, nothing is reserved.
+##
+## segs: Array[TrackSegment]
+func try_reserve(segs: Array) -> bool:
+	for seg in segs:
+		if is_blocked(seg):
+			return false
+	for seg in segs:
+		if seg.reserved_by != self:
+			seg.reserved_by = self
+			reserved.append(seg)
+	return true
+
+## Whether a segment is unavailable to this train: it or its reverse twin is
+## reserved by a different train.
+func is_blocked(seg: TrackSegment) -> bool:
+	if seg.reserved_by != null and seg.reserved_by != self:
+		return true
+	var rev := seg.reverse
+	return rev != null and rev.reserved_by != null and rev.reserved_by != self
+
+## Release one held segment (no-op unless this train is the holder).
+func release(seg: TrackSegment) -> void:
+	if seg.reserved_by == self:
+		seg.reserved_by = null
+	reserved.erase(seg)
+
+## Release every reservation this train holds.
+func release_all() -> void:
+	for seg in reserved:
+		if seg.reserved_by == self:
+			seg.reserved_by = null
+	reserved = []

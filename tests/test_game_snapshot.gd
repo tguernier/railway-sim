@@ -8,6 +8,7 @@ func run_all() -> void:
 	_t("clone_curves_preserved", _test_curves)
 	_t("clone_station_wiring_survives", _test_station_wiring)
 	_t("clone_orders_identity_mapped", _test_orders_mapped)
+	_t("clone_roster_plans_mapped", _test_roster_mapped)
 	_t("clone_routes_across_adjacency", _test_routing)
 	_t("clone_isolated_junction_survives", _test_isolated_junction)
 	_t("mutating_original_leaves_clone_untouched", _test_isolation)
@@ -114,6 +115,21 @@ func _test_orders_mapped() -> void:
 	_build_world(m)
 	var snap := GameSnapshot.capture(m)
 	eq(snap.train_orders[0], snap.towns[0])
+	m.free()
+
+func _test_roster_mapped() -> void:
+	var m := _main()
+	var town := _build_world(m)
+	m.roster.append(TrainPlan.new())
+	m.roster[1].car_count = 3
+	m.roster[1].orders.append(town)
+	m.selected_train = 1
+	var snap := GameSnapshot.capture(m)
+	eq(snap.roster.size(), 2)
+	eq(snap.selected_train, 1)
+	is_true(snap.roster[1] != m.roster[1])
+	eq(snap.roster[1].car_count, 3)
+	eq(snap.roster[1].orders[0], snap.towns[0])
 	m.free()
 
 func _test_routing() -> void:

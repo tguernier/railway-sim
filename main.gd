@@ -12,8 +12,8 @@ var towns: Array[Town] = []
 var network: TrackNetwork
 ## Track editor handling drawing state and track operations.
 var editor: TrackEditor
-## The active train (created when simulation starts).
-var train: Train
+## The running trains, one per roster plan (created when simulation starts).
+var trains: Array[Train] = []
 ## Player's current money, earned by delivering passengers.
 var money := 1000.0
 ## Frame counter used to throttle passenger generation.
@@ -29,10 +29,17 @@ var mouse_pos := Vector2.ZERO
 var editing_orders := false
 ## Whether the player is placing a station.
 var placing_station := false
-## The train's ordered stop list, built before simulation starts.
-var train_orders: Array[Town] = []
-## Number of cars for the train, chosen in edit mode ([ / ] keys).
-var car_count := 2
+## Per-train plans (orders + car count) built in edit mode, one per train.
+var roster: Array[TrainPlan] = []
+## Index into roster of the train whose orders/cars are being edited.
+var selected_train := 0
+## Orders of the selected roster train (the list order editing works on).
+var train_orders: Array[Town]:
+	get: return roster[selected_train].orders
+## Number of cars for the selected roster train ([ / ] keys).
+var car_count: int:
+	get: return roster[selected_train].car_count
+	set(v): roster[selected_train].car_count = v
 ## Transient status/error message shown below the hint text.
 var status_message := ""
 ## Seconds remaining before the status message disappears.
@@ -60,12 +67,20 @@ const JUNCTION_RADIUS := 8.0
 const STATUS_DURATION := 3.0
 ## Price of each train car beyond the first, charged at simulation start.
 const COST_PER_CAR := 150.0
+## Price of each train beyond the first, charged at simulation start.
+const TRAIN_COST := 500.0
+## Colours identifying each train (head car, order badges, route preview).
+const TRAIN_COLORS := [
+	Color.DARK_SLATE_GRAY, Color.MIDNIGHT_BLUE, Color.DARK_RED,
+	Color.DARK_GREEN, Color.REBECCA_PURPLE, Color.SADDLE_BROWN,
+]
 
 ## Runs when the node is ready
 func _ready() -> void:
 	RenderingServer.set_default_clear_color(Color.YELLOW_GREEN)
 	network = TrackNetwork.new()
 	editor = TrackEditor.new(network)
+	roster = [TrainPlan.new()]
 
 ## Reset the game to its initial editing state, discarding everything built.
 func _reset_game() -> void:
@@ -73,15 +88,15 @@ func _reset_game() -> void:
 	towns = []
 	network = TrackNetwork.new()
 	editor = TrackEditor.new(network)
-	train = null
+	trains = []
 	money = 1000.0
 	frame_count = 0
 	hovered_town = null
 	hovered_junction = null
 	editing_orders = false
 	placing_station = false
-	train_orders = []
-	car_count = 2
+	roster = [TrainPlan.new()]
+	selected_train = 0
 	next_color_index = 0
 	status_message = ""
 	status_timer = 0.0
@@ -181,6 +196,16 @@ func _handle_edit_input(event: InputEvent) -> void:
 			KEY_P:
 				if not editor.drawing:
 					placing_station = true
+			KEY_T:
+				if not editor.drawing:
+					_buy_train()
+			KEY_X:
+				if not editor.drawing:
+					_sell_train()
+			KEY_COMMA:
+				_select_train(-1)
+			KEY_PERIOD:
+				_select_train(1)
 			KEY_BRACKETLEFT:
 				car_count = maxi(car_count - 1, 1)
 			KEY_BRACKETRIGHT:
@@ -289,7 +314,10 @@ func _right_click_at(click_pos: Vector2) -> void:
 	var town := _find_town_at(click_pos)
 	if town != null:
 		_push_undo()
-		editor.remove_town(town, towns, train_orders)
+		var order_lists: Array = []
+		for plan in roster:
+			order_lists.append(plan.orders)
+		editor.remove_town(town, towns, order_lists)
 
 ## Handles inputs while placing a station.
 func _handle_station_input(event: InputEvent) -> void:
@@ -326,6 +354,10 @@ func _handle_order_input(event: InputEvent) -> void:
 		match event.keycode:
 			KEY_ESCAPE, KEY_O:
 				editing_orders = false
+			KEY_COMMA:
+				_select_train(-1)
+			KEY_PERIOD:
+				_select_train(1)
 			KEY_SPACE:
 				editing_orders = false
 				_start_simulation()
@@ -352,6 +384,26 @@ func _pop_order_stop() -> void:
 		_push_undo()
 		train_orders.pop_back()
 
+## Buy a new train (appended to the roster and selected), as one undo step.
+## The purchase price is charged at simulation start.
+func _buy_train() -> void:
+	_push_undo()
+	roster.append(TrainPlan.new())
+	selected_train = roster.size() - 1
+
+## Sell the selected train, as one undo step. The roster never goes empty.
+func _sell_train() -> void:
+	if roster.size() <= 1:
+		_show_status("The last train cannot be sold")
+		return
+	_push_undo()
+	roster.remove_at(selected_train)
+	selected_train = mini(selected_train, roster.size() - 1)
+
+## Select the previous/next roster train for editing (wraps around).
+func _select_train(step: int) -> void:
+	selected_train = (selected_train + step + roster.size()) % roster.size()
+
 ## Show a transient status message below the hint text.
 func _show_status(msg: String) -> void:
 	if msg == "":
@@ -373,67 +425,91 @@ func _place_town(pos: Vector2) -> void:
 	next_color_index += 1
 	towns.append(Town.new(pos, col))
 
-## Start the simulation.
+## Start the simulation: validate every roster plan, charge the fleet cost,
+## and spawn each train parked at its first stop's platform.
 func _start_simulation() -> void:
-	if train_orders.size() < 2 or network.segments.size() == 0:
+	if network.segments.size() == 0:
 		return
-	var stop_platforms: Array = []
-	for town in train_orders:
-		if town.station == null or town.station.platforms.size() == 0:
-			_show_status("All stops need a station before starting")
+	var first_stops := {}
+	var total_cost := (roster.size() - 1) * TRAIN_COST
+	for i in range(roster.size()):
+		var plan: TrainPlan = roster[i]
+		if plan.orders.size() < 2:
+			_show_status("Train %d needs at least 2 stops" % (i + 1))
 			return
-		stop_platforms.append(town.station.platforms[0])
-	var unroutable := network.first_unroutable_stop(stop_platforms)
-	if unroutable != -1:
-		_show_status("No track route to stop %d — connect it to the other stops" % (unroutable + 1))
+		var stop_platforms: Array = []
+		for town in plan.orders:
+			if town.station == null or town.station.platforms.size() == 0:
+				_show_status("All stops need a station before starting")
+				return
+			stop_platforms.append(town.station.platforms[0])
+		var unroutable := network.first_unroutable_stop(stop_platforms)
+		if unroutable != -1:
+			_show_status("Train %d: no track route to stop %d — connect it to the other stops"
+				% [i + 1, unroutable + 1])
+			return
+		# Each train parks at its first stop's platform, so first stops must
+		# be distinct.
+		var first: Town = plan.orders[0]
+		if first_stops.has(first):
+			_show_status("Trains %d and %d start at the same station — pick different first stops"
+				% [first_stops[first] + 1, i + 1])
+			return
+		first_stops[first] = i
+		total_cost += (plan.car_count - 1) * COST_PER_CAR
+	if money < total_cost:
+		_show_status("Not enough money for the fleet (costs %d: %d per extra train, %d per extra car)"
+			% [int(total_cost), int(TRAIN_COST), int(COST_PER_CAR)])
 		return
-	var car_cost := (car_count - 1) * COST_PER_CAR
-	if money < car_cost:
-		_show_status("Not enough money for %d cars (extra cars cost %d each)" % [car_count, int(COST_PER_CAR)])
-		return
-	money -= car_cost
+	money -= total_cost
 	state = GameState.SIMULATING
 	editing_orders = false
 	placing_station = false
-	train = Train.new()
-	train.car_count = car_count
-	train.orders = train_orders.duplicate()
-	train.current_order_index = 0
-	# The train starts parked at the first stop's platform, as if it had just
-	# finished a stop there — same anchoring as a departure.
-	var start_platform: Platform = train_orders[0].station.platforms[0]
-	_dispatch_to_next_order(start_platform.segment.node_end)
-	if train != null and train.has_route():
-		train.resume_from_stop(start_platform.segment,
-			_stop_point(start_platform.segment), start_platform.reverse_segment)
+	trains = []
+	for plan in roster:
+		var tr := Train.new()
+		tr.car_count = plan.car_count
+		tr.orders = plan.orders.duplicate()
+		tr.current_order_index = 0
+		trains.append(tr)
+		# The train starts parked at its first stop's platform, as if it had
+		# just finished a stop there — same anchoring as a departure.
+		var start_platform: Platform = plan.orders[0].station.platforms[0]
+		_dispatch_to_next_order(tr, start_platform.segment.node_end)
+		if state != GameState.SIMULATING:
+			return
+		if tr.has_route():
+			tr.resume_from_stop(start_platform.segment,
+				_stop_point(tr, start_platform.segment), start_platform.reverse_segment)
+			tr.try_reserve([tr.current_segment()])
 
-## Dispatch the train toward its next order stop's platform via Dijkstra.
+## Dispatch a train toward its next order stop's platform via Dijkstra.
 ## Orders are validated before the simulation starts, but a leg can still
 ## come up empty if the network or stations change mid-simulation — in that
 ## case the simulation is halted rather than leaving the train stranded.
-func _dispatch_to_next_order(from_node: NetworkNode) -> void:
-	train.advance_order()
-	var target := train.current_order_town()
+func _dispatch_to_next_order(tr: Train, from_node: NetworkNode) -> void:
+	tr.advance_order()
+	var target := tr.current_order_town()
 	if target == null or target.station == null or target.station.platforms.size() == 0:
 		_stop_simulation("A stop lost its station — simulation stopped")
 		return
 	var route := network.find_route_to_platform(from_node, target.station.platforms[0])
 	if route.size() > 0:
-		train.set_route(route)
+		tr.set_route(route)
 		# The route ends with the platform traversal — halt the head so the
 		# consist is centered on the platform.
-		train.stop_progress = _stop_point(route[-1])
+		tr.stop_progress = _stop_point(tr, route[-1])
 	else:
 		_stop_simulation("No track route to the next stop — simulation stopped")
 
 ## Head halt point (progress) on a platform segment that centers the consist
 ## on the platform. Consists always fit: car count is capped to the platform
 ## length, so the whole train sits on the platform segment while dwelling.
-func _stop_point(platform_seg: TrackSegment) -> float:
+func _stop_point(tr: Train, platform_seg: TrackSegment) -> float:
 	var total := platform_seg.length()
 	if total <= 0.0:
 		return 1.0
-	return clampf(0.5 + train.consist_length() / (2.0 * total), 0.0, 1.0)
+	return clampf(0.5 + tr.consist_length() / (2.0 * total), 0.0, 1.0)
 
 ## Largest consist size that fits within a station platform.
 func _max_car_count() -> int:
@@ -442,7 +518,9 @@ func _max_car_count() -> int:
 ## Halt the simulation and return to editing mode.
 func _stop_simulation(msg: String) -> void:
 	state = GameState.EDITING
-	train = null
+	for tr in trains:
+		tr.release_all()
+	trains = []
 	_show_status(msg)
 
 ## Handle 1 simulation tick.
@@ -456,48 +534,60 @@ func _process(delta: float) -> void:
 				town.generate_passengers()
 			frame_count = 0
 
-		train.move(delta)
-		if train.dwell_remaining <= 0.0:
-			if train.at_pending_stop():
-				if train.boarded_this_leg:
-					_depart_from_stop()
-				else:
-					_arrive_at_platform()
-			elif train.has_completed_route() and train.boarded_this_leg:
-				_dispatch_to_next_order(train.route[-1].node_end)
+		for tr in trains:
+			_update_train(tr, delta)
+			if state != GameState.SIMULATING:
+				break  # a dispatch failure stopped the simulation
 
 		frame_count += 1
 
 	queue_redraw()
+
+## Advance one train by one tick: move it, then handle its stop lifecycle.
+func _update_train(tr: Train, delta: float) -> void:
+	tr.move(delta)
+	if tr.dwell_remaining > 0.0:
+		return
+	if tr.at_pending_stop():
+		if tr.boarded_this_leg:
+			_depart_from_stop(tr)
+		else:
+			_arrive_at_platform(tr)
+	elif tr.has_completed_route() and tr.boarded_this_leg:
+		_dispatch_to_next_order(tr, tr.route[-1].node_end)
 
 ## The dwell is over: dispatch the next leg while the train sits at its stop
 ## point. When the leg leaves back the way the train came in (a dead-end
 ## station), the train turns around at the platform instead of rolling to the
 ## end of the track and bouncing back; otherwise it keeps its place and rolls
 ## forward through the rest of the platform onto the new route.
-func _depart_from_stop() -> void:
-	var seg := train.current_segment()
-	train.stop_progress = -1.0  # dwell over — pull away
+func _depart_from_stop(tr: Train) -> void:
+	var seg := tr.current_segment()
+	tr.stop_progress = -1.0  # dwell over — pull away
 	if seg == null or not seg.is_platform_segment():
 		return  # fall back to dispatching when the route completes
-	var progress := train.segment_progress
+	var progress := tr.segment_progress
 	var p: Platform = seg.platform
 	var reverse_seg := p.reverse_segment if seg == p.segment else p.segment
-	_dispatch_to_next_order(seg.node_end)
-	if train != null and train.has_route():
-		train.resume_from_stop(seg, progress, reverse_seg)
+	_dispatch_to_next_order(tr, seg.node_end)
+	if state == GameState.SIMULATING and tr.has_route():
+		tr.resume_from_stop(seg, progress, reverse_seg)
+		# Re-take the segment the consist sits on (set_route released it).
+		# Sequential train updates mean nobody can have grabbed it in between.
+		if not tr.try_reserve([tr.current_segment()]):
+			_stop_simulation("Track conflict at a station — simulation stopped")
 
-## The train has halted at its stop point (the middle of the target platform):
+## A train has halted at its stop point (the middle of the target platform):
 ## unload, board, and wait out the dwell time.
-func _arrive_at_platform() -> void:
-	train.boarded_this_leg = true
-	var seg := train.current_segment()
+func _arrive_at_platform(tr: Train) -> void:
+	tr.boarded_this_leg = true
+	var seg := tr.current_segment()
 	if seg != null and seg.is_platform_segment() and seg.platform.station != null:
 		var town := seg.platform.station.town
 		if town != null:
-			money += train.unload() * 10
-			train.board_from(town)
-	train.dwell_remaining = train.dwell_time
+			money += tr.unload() * 10
+			tr.board_from(town)
+	tr.dwell_remaining = tr.dwell_time
 
 ## Draw game scene.
 func _draw() -> void:
@@ -509,11 +599,11 @@ func _draw() -> void:
 	if state == GameState.EDITING:
 		_draw_editor_overlay()
 	elif state == GameState.SIMULATING:
-		_draw_train()
+		_draw_trains()
 		_draw_hud()
 
 	if status_timer > 0.0:
-		draw_string(ThemeDB.fallback_font, Vector2(10, 40), status_message,
+		draw_string(ThemeDB.fallback_font, Vector2(10, 60), status_message,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.RED)
 
 ## Draw tracks.
@@ -621,12 +711,20 @@ func _draw_towns() -> void:
 				"Waiting: %d" % int(town.waiting), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, label_color)
 
 	if state == GameState.EDITING:
-		for i in range(train_orders.size()):
-			var town: Town = train_orders[i]
-			var label_pos := town.position + Vector2(town.radius, -town.radius) * 0.75
-			draw_circle(label_pos, 12, Color.WHITE)
-			draw_string(ThemeDB.fallback_font, label_pos + Vector2(-4, 5),
-				str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.BLACK)
+		# Order badges, one row per roster train in its colour; the selected
+		# train's badges get a white ring.
+		for ti in range(roster.size()):
+			var badge_color: Color = TRAIN_COLORS[ti % TRAIN_COLORS.size()]
+			var orders: Array[Town] = roster[ti].orders
+			for i in range(orders.size()):
+				var stop: Town = orders[i]
+				var label_pos := stop.position + Vector2(stop.radius, -stop.radius) * 0.75 \
+					+ Vector2(0, ti * 28.0)
+				draw_circle(label_pos, 12, badge_color)
+				if ti == selected_train:
+					draw_arc(label_pos, 13.5, 0, TAU, 24, Color.WHITE, 2.0)
+				draw_string(ThemeDB.fallback_font, label_pos + Vector2(-4, 5),
+					str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.WHITE)
 
 ## Draw editor overlay.
 func _draw_editor_overlay() -> void:
@@ -649,10 +747,28 @@ func _draw_editor_overlay() -> void:
 				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
-		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | U to undo | O to edit orders | [ ] cars: %d | R to reset" % car_count
-		if train_orders.size() >= 2 and network.segments.size() > 0:
+		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | U to undo | O to edit orders | R to reset"
+		if _ready_to_start():
 			hint += " | SPACE to start"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
+		_draw_roster_line()
+
+## Whether every roster train has enough stops to start the simulation.
+func _ready_to_start() -> bool:
+	if network.segments.size() == 0:
+		return false
+	for plan in roster:
+		if plan.orders.size() < 2:
+			return false
+	return true
+
+## One-line roster readout in the selected train's colour.
+func _draw_roster_line() -> void:
+	var color: Color = TRAIN_COLORS[selected_train % TRAIN_COLORS.size()]
+	var line := "Train %d/%d — cars: %d, stops: %d | T to buy | , . to select | X to sell | [ ] cars" \
+		% [selected_train + 1, roster.size(), car_count, train_orders.size()]
+	draw_string(ThemeDB.fallback_font, Vector2(10, 40), line,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 16, color)
 
 ## Draw the track preview colored by curvature (green = OK, red = too tight).
 func _draw_curvature_preview() -> void:
@@ -724,18 +840,25 @@ func _draw_finish_angle_preview() -> void:
 	draw_string(ThemeDB.fallback_font, target_pos + Vector2(15, 25),
 		"%d°" % int(rad_to_deg(min_diff)), HORIZONTAL_ALIGNMENT_LEFT, -1, 14, color)
 
-## Draw order editing overlay — hint text and route preview.
+## Draw order editing overlay — hint text and per-train route previews.
 func _draw_order_overlay() -> void:
-	var hint := "ORDERS: Click towns with stations to add/remove stops | RIGHT-CLICK to remove last | U to undo | ESC/O to finish"
-	if train_orders.size() >= 2:
+	var hint := "ORDERS (Train %d): Click towns with stations to add/remove stops | RIGHT-CLICK to remove last | , . to switch train | U to undo | ESC/O to finish" \
+		% (selected_train + 1)
+	if _ready_to_start():
 		hint += " | SPACE to start simulation"
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
-	if train_orders.size() >= 2:
-		for i in range(train_orders.size()):
-			var from_pos: Vector2 = train_orders[i].position
-			var to_pos: Vector2 = train_orders[(i + 1) % train_orders.size()].position
+	_draw_roster_line()
+	for ti in range(roster.size()):
+		var orders: Array[Town] = roster[ti].orders
+		if orders.size() < 2:
+			continue
+		var color: Color = TRAIN_COLORS[ti % TRAIN_COLORS.size()]
+		var alpha := 0.55 if ti == selected_train else 0.2
+		for i in range(orders.size()):
+			var from_pos: Vector2 = orders[i].position
+			var to_pos: Vector2 = orders[(i + 1) % orders.size()].position
 			_draw_dashed_line(PackedVector2Array([from_pos, to_pos]),
-				Color(1, 1, 0, 0.4), 2.0, 10.0)
+				Color(color, alpha), 2.0, 10.0)
 
 ## Draw dashed line for track preview in editing mode.
 func _draw_dashed_line(points: PackedVector2Array, color: Color, width: float, dash_length: float) -> void:
@@ -762,30 +885,37 @@ func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: fl
 		var a0 := TAU * float(i) / float(dashes)
 		draw_arc(center, radius, a0, a0 + TAU / float(dashes) * 0.6, 4, color, width)
 
-## Draw the train as a chain of cars, each sampled at its own point along the
+## Draw all running trains, each in its roster colour.
+func _draw_trains() -> void:
+	for i in range(trains.size()):
+		_draw_train(trains[i], TRAIN_COLORS[i % TRAIN_COLORS.size()])
+
+## Draw one train as a chain of cars, each sampled at its own point along the
 ## track so the consist bends with the curves.
-func _draw_train() -> void:
+func _draw_train(tr: Train, color: Color) -> void:
 	var half := Train.CAR_LENGTH / 2.0
-	for i in range(train.car_count):
+	for i in range(tr.car_count):
 		var back := i * (Train.CAR_LENGTH + Train.CAR_GAP) + half
-		var xf := train.point_behind(back)
+		var xf := tr.point_behind(back)
 		draw_set_transform(xf.origin, xf.get_rotation())
 		draw_rect(Rect2(-half + 1, -7, Train.CAR_LENGTH - 2, 14),
-			Color.DARK_SLATE_GRAY if i == 0 else Color.DIM_GRAY)
+			color if i == 0 else Color.DIM_GRAY)
 		if i == 0:
 			draw_circle(Vector2(half - 3, 0), 2.0, Color.YELLOW)
-		if i == train.car_count - 1:
+		if i == tr.car_count - 1:
 			draw_circle(Vector2(-half + 3, 0), 2.0, Color.RED)
 	draw_set_transform(Vector2.ZERO, 0)
-	var head_pos := train.current_position()
+	var head_pos := tr.current_position()
 	draw_string(ThemeDB.fallback_font, head_pos + Vector2(-20, -15),
-		"%d" % train.passengers_on_board)
-	if train.dwell_remaining > 0.0:
+		"%d/%d" % [tr.passengers_on_board, tr.capacity])
+	if tr.dwell_remaining > 0.0:
 		draw_string(ThemeDB.fallback_font, head_pos + Vector2(-30, 28),
 			"Boarding...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.WHITE)
+	elif tr.waiting_for_track:
+		draw_string(ThemeDB.fallback_font, head_pos + Vector2(-30, 28),
+			"Waiting...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.RED)
 
 ## Draw HUD.
 func _draw_hud() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-		"Money: %d | Cars: %d | On board: %d/%d | R to reset" % [money, train.car_count,
-			train.passengers_on_board, train.capacity])
+		"Money: %d | Trains: %d | R to reset" % [money, trains.size()])

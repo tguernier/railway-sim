@@ -17,6 +17,9 @@ func run_all() -> void:
 	_t("order_add_rejected_burns_no_undo", _test_order_rejected_no_push)
 	_t("order_remove_undo_restores_index", _test_order_remove_undo)
 	_t("order_pop_undo", _test_order_pop_undo)
+	_t("buy_train_undo", _test_buy_train_undo)
+	_t("sell_train_undo_restores_plan", _test_sell_train_undo)
+	_t("sell_last_train_rejected", _test_sell_last_train)
 	_t("two_actions_two_undos", _test_two_actions)
 	_t("undo_empty_stack_shows_status", _test_empty_stack)
 	_t("undo_stack_capped_at_limit", _test_stack_capped)
@@ -239,6 +242,41 @@ func _test_order_pop_undo() -> void:
 	m._undo()
 	eq(m.train_orders.size(), 2)
 	eq(m.train_orders[1].position, b.position)
+	m.free()
+
+func _test_buy_train_undo() -> void:
+	var m := _main()
+	m._buy_train()
+	eq(m.roster.size(), 2)
+	eq(m.selected_train, 1)
+	eq(m.undo_stack.size(), 1)
+	m._undo()
+	eq(m.roster.size(), 1)
+	eq(m.selected_train, 0)
+	m.free()
+
+func _test_sell_train_undo() -> void:
+	var m := _main()
+	var town := _town_with_station(m, 0.0)
+	m._buy_train()
+	m.roster[1].car_count = 3
+	m.roster[1].orders.append(town)
+	m._sell_train()
+	eq(m.roster.size(), 1)
+	eq(m.undo_stack.size(), 2)
+	m._undo()
+	eq(m.roster.size(), 2)
+	eq(m.roster[1].car_count, 3)
+	eq(m.roster[1].orders.size(), 1)
+	eq(m.roster[1].orders[0], m.towns[0])
+	m.free()
+
+func _test_sell_last_train() -> void:
+	var m := _main()
+	m._sell_train()
+	eq(m.roster.size(), 1)
+	is_true(m.status_message != "")
+	eq(m.undo_stack.size(), 0)
 	m.free()
 
 func _test_two_actions() -> void:

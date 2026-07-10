@@ -442,7 +442,7 @@ func _test_remove_town() -> void:
 	var orders: Array[Town] = [town]
 	var station := ed.place_station(Vector2(150, 0), towns)
 	is_true(station != null)
-	ed.remove_town(town, towns, orders)
+	ed.remove_town(town, towns, [orders])
 	eq(town.station, null)
 	is_false(towns.has(town))
 	is_true(towns.has(other))
