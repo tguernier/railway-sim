@@ -218,6 +218,56 @@ func split_track_at_hit(hit: Array) -> NetworkNode:
 
 	return junction
 
+## Place a signal on the track at a screen position: split the segment there
+## (relinking reverse pairs) and flag the new junction as a two-way signal.
+## The facing (used when cycling to a directional kind) is seeded from the hit
+## segment's tangent at the click. Returns the signal node, or null with
+## last_error set.
+func place_signal(pos: Vector2) -> NetworkNode:
+	var hit := find_track_at(pos)
+	if hit.size() == 0:
+		last_error = "Click on a track to place a signal"
+		return null
+	var hit_seg: TrackSegment = hit[0]
+	var facing := Vector2.from_angle(hit_seg.angle_at(hit[1]))
+	var node := split_track_at_hit(hit)
+	if node == null:
+		last_error = "Cannot place a signal inside a station"
+		return null
+	node.signal_kind = NetworkNode.SignalKind.TWO_WAY
+	node.signal_facing = facing
+	return node
+
+## Cycle a signal's kind: two-way → path (directional, freely passable from
+## behind) → one-way (directional, impassable from behind) → two-way. A signal
+## without a stored facing gets one from its outgoing track first, so the
+## directional kinds always govern a real travel direction.
+func cycle_signal_kind(node: NetworkNode) -> void:
+	if node.signal_facing == Vector2.ZERO:
+		var outgoing := network.get_outgoing(node)
+		if outgoing.size() > 0:
+			node.signal_facing = Vector2.from_angle(outgoing[0].angle_at(0.0))
+	match node.signal_kind:
+		NetworkNode.SignalKind.TWO_WAY:
+			node.signal_kind = NetworkNode.SignalKind.PATH
+		NetworkNode.SignalKind.PATH:
+			node.signal_kind = NetworkNode.SignalKind.ONE_WAY
+		NetworkNode.SignalKind.ONE_WAY:
+			node.signal_kind = NetworkNode.SignalKind.TWO_WAY
+
+## Flip which way a signal faces (meaningful for the directional kinds).
+func flip_signal(node: NetworkNode) -> void:
+	node.signal_facing = -node.signal_facing
+
+## Remove the signal at a screen position by clearing its flag — the node
+## stays behind as a harmless degree-2 junction. Returns true if one was hit.
+func remove_signal_at(pos: Vector2) -> bool:
+	var node := find_signal_at(pos)
+	if node == null:
+		return false
+	node.is_signal = false
+	return true
+
 ## Try to delete the track at a screen position. Platform segments are
 ## protected — the station must be removed first. Returns true if a track
 ## pair was deleted.
@@ -239,11 +289,11 @@ func try_delete_track_at(pos: Vector2) -> bool:
 	return true
 
 ## Remove a town from the map. Towns are not graph nodes, so this only needs
-## to tear down the town's station (if any) and drop it from the lists.
-func remove_town(town: Town, towns: Array[Town], train_orders: Array[Town]) -> void:
+## to tear down the town's station (if any) and drop it from the list — the
+## caller cleans up trains homed there and order lists referencing it.
+func remove_town(town: Town, towns: Array[Town]) -> void:
 	remove_station(town)
 	towns.erase(town)
-	train_orders.erase(town)
 
 ## Remove a town's station: delete its platform segments and clean up the
 ## entry/exit junctions if nothing else connects to them.
@@ -348,10 +398,21 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 
 # --- Hit testing ---
 
-## Returns the junction node at a screen position, if there is one.
+## Returns the junction node at a screen position, if there is one. Signal
+## nodes are skipped: they are block boundaries, not connection points, so a
+## click on one falls through to the track underneath.
 func find_junction_at(pos: Vector2) -> NetworkNode:
 	for node in network.nodes:
+		if node.is_signal:
+			continue
 		if pos.distance_to(node.position) < HIT_RADIUS:
+			return node
+	return null
+
+## Returns the signal node at a screen position, if there is one.
+func find_signal_at(pos: Vector2) -> NetworkNode:
+	for node in network.nodes:
+		if node.is_signal and pos.distance_to(node.position) < HIT_RADIUS:
 			return node
 	return null
 

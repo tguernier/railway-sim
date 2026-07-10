@@ -10,6 +10,7 @@ func run_all() -> void:
 	_t("clone_orders_identity_mapped", _test_orders_mapped)
 	_t("clone_routes_across_adjacency", _test_routing)
 	_t("clone_isolated_junction_survives", _test_isolated_junction)
+	_t("clone_copies_signal_kind_and_facing", _test_signal_cloned)
 	_t("mutating_original_leaves_clone_untouched", _test_isolation)
 	_t("restore_swaps_state_into_main", _test_restore)
 
@@ -34,7 +35,12 @@ func _build_world(m: Node2D) -> Town:
 	town.waiting = 7.0
 	m.towns.append(town)
 	ed.place_station(Vector2(750, 0), m.towns)
-	m.train_orders.append(town)
+	var train := Train.new()
+	train.car_count = 3
+	train.home_platform = town.station.platforms[0]
+	train.orders.append(town)
+	m.trains.append(train)
+	m.money = 750.0
 	m.next_color_index = 3
 	return town
 
@@ -61,7 +67,8 @@ func _test_counts() -> void:
 	eq(snap.network.segments.size(), 10)
 	eq(snap.network.nodes.size(), 6)
 	eq(snap.towns.size(), 1)
-	eq(snap.train_orders.size(), 1)
+	eq(snap.trains.size(), 1)
+	eq(snap.money, 750.0)
 	eq(snap.next_color_index, 3)
 	m.free()
 
@@ -113,7 +120,11 @@ func _test_orders_mapped() -> void:
 	var m := _main()
 	_build_world(m)
 	var snap := GameSnapshot.capture(m)
-	eq(snap.train_orders[0], snap.towns[0])
+	var train_clone: Train = snap.trains[0]
+	is_true(train_clone != m.trains[0])
+	eq(train_clone.car_count, 3)
+	eq(train_clone.orders[0], snap.towns[0])
+	eq(train_clone.home_platform, snap.towns[0].station.platforms[0])
 	m.free()
 
 func _test_routing() -> void:
@@ -137,6 +148,20 @@ func _test_isolated_junction() -> void:
 	is_true(_node_at(snap.network, Vector2(50, 500)) != null)
 	m.free()
 
+func _test_signal_cloned() -> void:
+	var m := _main()
+	_build_world(m)
+	var sig: NetworkNode = m.editor.place_signal(Vector2(1050, 0))
+	sig.signal_kind = NetworkNode.SignalKind.ONE_WAY
+	sig.signal_facing = Vector2.LEFT
+	var snap := GameSnapshot.capture(m)
+	var clone := _node_at(snap.network, sig.position)
+	is_true(clone != null)
+	is_true(clone != sig)
+	eq(clone.signal_kind, NetworkNode.SignalKind.ONE_WAY)
+	eq(clone.signal_facing, Vector2.LEFT)
+	m.free()
+
 func _test_isolation() -> void:
 	var m := _main()
 	var town := _build_world(m)
@@ -156,11 +181,13 @@ func _test_restore() -> void:
 	var snap := GameSnapshot.capture(m)
 	m.hovered_town = m.towns[0]
 	m.next_color_index = 8
+	m.money = 20.0
 	snap.restore(m)
 	eq(m.network, snap.network)
 	eq(m.editor.network, snap.network)
 	eq(m.towns[0], snap.towns[0])
-	eq(m.train_orders[0], snap.towns[0])
+	eq(m.trains[0], snap.trains[0])
+	eq(m.money, 750.0)
 	eq(m.next_color_index, 3)
 	eq(m.hovered_town, null)
 	eq(m.hovered_junction, null)

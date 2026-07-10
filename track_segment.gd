@@ -23,9 +23,46 @@ var reverse: TrackSegment:
 	get: return _reverse_ref.get_ref() as TrackSegment if _reverse_ref != null else null
 	set(s): _reverse_ref = weakref(s) if s != null else null
 
+## The train currently holding this block, if any. Stored as a weak reference
+## (segment → train is a back-reference; the train's route holds the segment).
+var _occupying_ref: WeakRef = null
+var occupying_train: Train:
+	get: return _occupying_ref.get_ref() as Train if _occupying_ref != null else null
+	set(t): _occupying_ref = weakref(t) if t != null else null
+
 ## Whether this segment is occupied by a station platform.
 func is_platform_segment() -> bool:
 	return platform != null
+
+## Whether the signal (if any) at this segment's end bounds a reservation
+## span for travel along it. A ONE_WAY signal met from behind also counts:
+## routing never produces such a crossing, but treating it as a boundary
+## keeps a stale route from sailing through against it.
+func ends_reservation_span() -> bool:
+	if not node_end.is_signal:
+		return false
+	var dir := Vector2.from_angle(angle_at(1.0))
+	return node_end.signal_governs(dir) or node_end.blocks_travel(dir)
+
+## Whether this physical block (this segment or its reverse twin) is held by a
+## train other than the given one. Pass null to test for any occupant.
+func is_occupied_by_other(train: Train) -> bool:
+	if occupying_train != null and occupying_train != train:
+		return true
+	return reverse != null and reverse.occupying_train != null \
+		and reverse.occupying_train != train
+
+## Reserve this block for a train. Fails if another train holds this segment
+## or its reverse twin. Re-reserving by the same train succeeds.
+func reserve(train: Train) -> bool:
+	if is_occupied_by_other(train):
+		return false
+	occupying_train = train
+	return true
+
+## Free this block.
+func release() -> void:
+	occupying_train = null
 
 ## Initialize a track segment between two network nodes, with optional waypoints.
 func _init(start: NetworkNode, end: NetworkNode, waypoints: Array[Vector2] = []) -> void:

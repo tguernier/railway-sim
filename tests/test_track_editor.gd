@@ -51,6 +51,15 @@ func run_all() -> void:
 	_t("split_rejected_on_platform", _test_split_rejected_on_platform)
 	_t("delete_rejected_on_platform", _test_delete_rejected_on_platform)
 	_t("remove_town_removes_station", _test_remove_town)
+	_t("place_signal_splits_and_flags_node", _test_place_signal)
+	_t("place_signal_rejected_on_platform", _test_place_signal_platform)
+	_t("place_signal_rejected_off_track", _test_place_signal_miss)
+	_t("remove_signal_clears_flag_keeps_junction", _test_remove_signal)
+	_t("find_junction_at_skips_signals", _test_find_junction_skips_signals)
+	_t("place_signal_seeds_two_way_and_facing", _test_place_signal_facing)
+	_t("cycle_signal_kind_cycles_three_kinds", _test_cycle_signal_kind)
+	_t("cycle_signal_derives_missing_facing", _test_cycle_derives_facing)
+	_t("flip_signal_reverses_facing", _test_flip_signal)
 
 func _test_start_drawing() -> void:
 	var ed := _editor()
@@ -439,15 +448,86 @@ func _test_remove_town() -> void:
 	var town := Town.new(Vector2(150, 0), Color.WHITE)
 	var other := Town.new(Vector2(500, 500), Color.WHITE)
 	var towns: Array[Town] = [town, other]
-	var orders: Array[Town] = [town]
 	var station := ed.place_station(Vector2(150, 0), towns)
 	is_true(station != null)
-	ed.remove_town(town, towns, orders)
+	ed.remove_town(town, towns)
 	eq(town.station, null)
 	is_false(towns.has(town))
 	is_true(towns.has(other))
-	eq(orders.size(), 0)
 	# Platform pair removed, approach tracks remain
 	eq(ed.network.segments.size(), 4)
 	for seg in ed.network.segments:
 		is_false(seg.is_platform_segment())
+
+func _test_place_signal() -> void:
+	var ed := _editor_with_track()
+	var node := ed.place_signal(Vector2(150, 0))
+	is_true(node != null)
+	is_true(node.is_signal)
+	eq(ed.network.segments.size(), 4)  # split into two pairs
+	# Degree exactly 2 and reverse pairs relinked across the split.
+	eq(ed.network.get_outgoing(node).size(), 2)
+	for seg in ed.network.get_outgoing(node):
+		is_true(seg.reverse != null)
+		eq(seg.reverse.reverse, seg)
+
+func _test_place_signal_platform() -> void:
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(600, 0), [])
+	var towns: Array[Town] = [Town.new(Vector2(300, 30), Color.WHITE)]
+	ed.place_station(Vector2(300, 0), towns)
+	var count := ed.network.segments.size()
+	eq(ed.place_signal(Vector2(300, 0)), null)  # platform centre — protected
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), count)
+
+func _test_place_signal_miss() -> void:
+	var ed := _editor_with_track()
+	eq(ed.place_signal(Vector2(150, 200)), null)
+	is_true(ed.last_error != "")
+
+func _test_remove_signal() -> void:
+	var ed := _editor_with_track()
+	var node := ed.place_signal(Vector2(150, 0))
+	is_false(ed.remove_signal_at(Vector2(150, 200)))  # miss
+	is_true(ed.remove_signal_at(Vector2(150, 0)))
+	is_false(node.is_signal)  # node survives as a plain junction
+	is_true(ed.network.nodes.has(node))
+
+func _test_find_junction_skips_signals() -> void:
+	var ed := _editor_with_track()
+	var node := ed.place_signal(Vector2(150, 0))
+	eq(ed.find_junction_at(Vector2(150, 0)), null)  # not a connection point
+	eq(ed.find_signal_at(Vector2(150, 0)), node)
+
+func _test_place_signal_facing() -> void:
+	var ed := _editor_with_track()  # runs along +x
+	var node := ed.place_signal(Vector2(150, 0))
+	eq(node.signal_kind, NetworkNode.SignalKind.TWO_WAY)
+	is_true(node.signal_facing.dot(Vector2.RIGHT) > 0.9)  # tangent of the hit segment
+
+func _test_cycle_signal_kind() -> void:
+	var ed := _editor_with_track()
+	var node := ed.place_signal(Vector2(150, 0))
+	ed.cycle_signal_kind(node)
+	eq(node.signal_kind, NetworkNode.SignalKind.PATH)
+	ed.cycle_signal_kind(node)
+	eq(node.signal_kind, NetworkNode.SignalKind.ONE_WAY)
+	ed.cycle_signal_kind(node)
+	eq(node.signal_kind, NetworkNode.SignalKind.TWO_WAY)
+	is_true(node.is_signal)  # cycling never removes the signal
+
+func _test_cycle_derives_facing() -> void:
+	var ed := _editor_with_track()
+	var node := ed.place_signal(Vector2(150, 0))
+	node.signal_facing = Vector2.ZERO  # e.g. older state with no facing stored
+	ed.cycle_signal_kind(node)
+	eq(node.signal_kind, NetworkNode.SignalKind.PATH)
+	is_true(node.signal_facing != Vector2.ZERO)  # governs a real direction
+
+func _test_flip_signal() -> void:
+	var ed := _editor_with_track()
+	var node := ed.place_signal(Vector2(150, 0))
+	var before: Vector2 = node.signal_facing
+	ed.flip_signal(node)
+	eq(node.signal_facing, -before)

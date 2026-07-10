@@ -39,6 +39,10 @@ func run_all() -> void:
 	_t("point_behind_clamps_at_oldest_point", _test_point_behind_clamps)
 	_t("set_route_clears_history", _test_set_route_clears_history)
 	_t("resume_forward_keeps_tail_continuous", _test_resume_forward_tail)
+	_t("block_held_until_tail_clears_it", _test_block_held_until_tail_clears)
+	_t("release_all_blocks_frees_footprint_and_span", _test_release_all_blocks)
+	_t("set_route_releases_old_holdings", _test_set_route_releases)
+	_t("release_block_spares_other_trains_hold", _test_release_block_other)
 
 func _test_no_route() -> void:
 	var tr := Train.new()
@@ -276,6 +280,53 @@ func _test_set_route_clears_history() -> void:
 	eq(tr.history.size(), 1)
 	tr.set_route([_seg(_node(0, 0), _node(100, 0))])
 	eq(tr.history.size(), 0)
+
+func _test_block_held_until_tail_clears() -> void:
+	# 100 px segments, 56 px consist: the first block must stay reserved while
+	# the tail still needs it, and free the moment the tail clears it.
+	var tr := Train.new()
+	var segs := _route_of_three(tr)
+	for seg in segs:
+		is_true(seg.reserve(tr))
+	tr.move(1.0)  # head at x=150: tail at x=94, still on the first segment
+	eq(segs[0].occupying_train, tr)
+	tr.move(0.1)  # head at x=165: tail at x=109 — first block cleared
+	eq(segs[0].occupying_train, null)
+	eq(segs[1].occupying_train, tr)
+
+func _test_release_all_blocks() -> void:
+	var tr := Train.new()
+	var segs := _route_of_three(tr)
+	for seg in segs:
+		is_true(seg.reserve(tr))
+	tr.move(1.0)  # head mid-route with one history segment
+	tr.release_all_blocks()
+	for seg in segs:
+		eq(seg.occupying_train, null)
+
+func _test_set_route_releases() -> void:
+	var tr := Train.new()
+	var segs := _route_of_three(tr)
+	for seg in segs:
+		is_true(seg.reserve(tr))
+	tr.reserved_until = 2
+	tr.move(1.0)  # head on segs[1], history [segs[0]]
+	var next_seg := _seg(_node(300, 0), _node(400, 0))
+	tr.set_route([next_seg])
+	# History and the reserved span ahead are freed; the old head segment stays
+	# held (the consist is still physically on it until re-anchored).
+	eq(segs[0].occupying_train, null)
+	eq(segs[1].occupying_train, tr)
+	eq(segs[2].occupying_train, null)
+	eq(tr.reserved_until, -1)
+
+func _test_release_block_other() -> void:
+	var tr := Train.new()
+	var other := Train.new()
+	var seg := _seg(_node(0, 0), _node(100, 0))
+	is_true(seg.reserve(other))
+	tr.release_block(seg)  # not ours — must not free it
+	eq(seg.occupying_train, other)
 
 func _test_resume_forward_tail() -> void:
 	# Roll-forward departure: the platform segment is prepended, so the tail

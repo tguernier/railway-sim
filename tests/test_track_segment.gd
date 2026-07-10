@@ -24,6 +24,10 @@ func run_all() -> void:
 	_t("straight_segment_infinite_radius", _test_straight_infinite_radius)
 	_t("gentle_curve_large_radius", _test_gentle_curve_radius)
 	_t("tight_uturn_small_radius", _test_tight_uturn_radius)
+	_t("reserve_and_release_block", _test_reserve_release)
+	_t("reserve_fails_when_other_train_holds", _test_reserve_other_train)
+	_t("same_train_re_reserve_ok", _test_reserve_same_train)
+	_t("reverse_twin_blocks_both_directions", _test_reverse_pair_blocking)
 
 func _test_stores_nodes() -> void:
 	var a := _node(0.0, 0.0)
@@ -102,3 +106,49 @@ func _test_tight_uturn_radius() -> void:
 	var r := seg.min_radius_of_curvature()
 	check(r < TrackEditor.MIN_CURVE_RADIUS,
 		"expected tight U-turn radius %.1f < %.1f" % [r, TrackEditor.MIN_CURVE_RADIUS])
+
+func _test_reserve_release() -> void:
+	var seg := _seg(0.0, 0.0, 200.0, 0.0)
+	var tr := Train.new()
+	eq(seg.occupying_train, null)
+	is_false(seg.is_occupied_by_other(null))
+	is_true(seg.reserve(tr))
+	eq(seg.occupying_train, tr)
+	is_true(seg.is_occupied_by_other(null))
+	is_false(seg.is_occupied_by_other(tr))
+	seg.release()
+	eq(seg.occupying_train, null)
+
+func _test_reserve_other_train() -> void:
+	var seg := _seg(0.0, 0.0, 200.0, 0.0)
+	var a := Train.new()
+	var b := Train.new()
+	is_true(seg.reserve(a))
+	is_true(seg.is_occupied_by_other(b))
+	is_false(seg.reserve(b))
+	eq(seg.occupying_train, a)  # unchanged by the failed attempt
+
+func _test_reserve_same_train() -> void:
+	var seg := _seg(0.0, 0.0, 200.0, 0.0)
+	var tr := Train.new()
+	is_true(seg.reserve(tr))
+	is_true(seg.reserve(tr))  # idempotent for the holder
+	eq(seg.occupying_train, tr)
+
+func _test_reverse_pair_blocking() -> void:
+	# A->B and B->A are the same physical block: holding one blocks the other.
+	var a := _node(0.0, 0.0)
+	var b := _node(200.0, 0.0)
+	var fwd := TrackSegment.new(a, b)
+	var rev := TrackSegment.new(b, a)
+	fwd.reverse = rev
+	rev.reverse = fwd
+	var t1 := Train.new()
+	var t2 := Train.new()
+	is_true(fwd.reserve(t1))
+	is_true(rev.is_occupied_by_other(t2))
+	is_false(rev.reserve(t2))
+	is_true(rev.reserve(t1))  # the pair holder may take the twin too
+	fwd.release()
+	rev.release()
+	is_true(rev.reserve(t2))

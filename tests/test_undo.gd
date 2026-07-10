@@ -18,6 +18,11 @@ func run_all() -> void:
 	_t("order_remove_undo_restores_index", _test_order_remove_undo)
 	_t("order_pop_undo", _test_order_pop_undo)
 	_t("two_actions_two_undos", _test_two_actions)
+	_t("place_signal_undo_restores_track", _test_place_signal_undo)
+	_t("failed_signal_burns_no_undo", _test_failed_signal_no_push)
+	_t("remove_signal_undo_restores_flag", _test_remove_signal_undo)
+	_t("cycle_signal_undo_restores_kind", _test_cycle_signal_undo)
+	_t("flip_signal_undo_restores_facing", _test_flip_signal_undo)
 	_t("undo_empty_stack_shows_status", _test_empty_stack)
 	_t("undo_stack_capped_at_limit", _test_stack_capped)
 	_t("reset_clears_undo_stack", _test_reset_clears)
@@ -40,6 +45,16 @@ func _town_with_station(m: Node2D, y: float) -> Town:
 	m.towns.append(town)
 	ed.place_station(Vector2(300, y), m.towns)
 	return town
+
+## A train homed at a stationed town, added directly (no undo entry, no
+## purchase charge) so order-editing tests have a selected train to work on.
+func _add_train(m: Node2D, town: Town) -> Train:
+	var t := Train.new()
+	t.car_count = 1
+	t.home_platform = town.station.platforms[0]
+	m.trains.append(t)
+	m.selected_train = m.trains.size() - 1
+	return t
 
 func _test_place_town_undo() -> void:
 	var m := _main()
@@ -169,39 +184,48 @@ func _test_delete_no_push() -> void:
 func _test_remove_town_undo() -> void:
 	var m := _main()
 	var town := _town_with_station(m, 0.0)
-	m.train_orders.append(town)
+	var t := _add_train(m, town)
+	t.orders.append(town)
+	var money_before: float = m.money
 	eq(m.network.segments.size(), 6)
 	m._right_click_at(town.position)
 	eq(m.towns.size(), 0)
-	eq(m.train_orders.size(), 0)
+	eq(m.trains.size(), 0)  # the train homed there was removed...
+	approx(m.money, money_before + m.TRAIN_COST, 0.01)  # ...and refunded
 	eq(m.network.segments.size(), 4)  # platform pair gone, approaches remain
 	eq(m.undo_stack.size(), 1)
 	m._undo()
 	eq(m.towns.size(), 1)
 	is_true(m.towns[0].station != null)
-	eq(m.train_orders.size(), 1)
-	eq(m.train_orders[0], m.towns[0])
+	eq(m.trains.size(), 1)
+	eq(m.trains[0].orders.size(), 1)
+	eq(m.trains[0].orders[0], m.towns[0])
+	is_true(m.towns[0].station.platforms.has(m.trains[0].home_platform))
+	approx(m.money, money_before, 0.01)
 	eq(m.network.segments.size(), 6)
 	m.free()
 
 func _test_order_add_undo() -> void:
 	var m := _main()
 	var town := _town_with_station(m, 0.0)
+	_add_train(m, town)
 	m.editing_orders = true
 	m._toggle_order_stop(town.position)
-	eq(m.train_orders.size(), 1)
+	eq(m.trains[0].orders.size(), 1)
 	eq(m.undo_stack.size(), 1)
 	m._undo()
-	eq(m.train_orders.size(), 0)
+	eq(m.trains[0].orders.size(), 0)
 	m.free()
 
 func _test_order_rejected_no_push() -> void:
 	var m := _main()
+	var home := _town_with_station(m, 0.0)
+	_add_train(m, home)
 	var town := Town.new(Vector2(300, 300), Color.WHITE)
 	m.towns.append(town)
 	m.editing_orders = true
 	m._toggle_order_stop(town.position)  # no station — rejected
-	eq(m.train_orders.size(), 0)
+	eq(m.trains[0].orders.size(), 0)
 	is_true(m.status_message != "")
 	eq(m.undo_stack.size(), 0)
 	m.free()
@@ -210,35 +234,37 @@ func _test_order_remove_undo() -> void:
 	var m := _main()
 	var a := _town_with_station(m, 0.0)
 	var b := _town_with_station(m, 400.0)
-	m.train_orders.append(a)
-	m.train_orders.append(b)
+	var t := _add_train(m, a)
+	t.orders.append(a)
+	t.orders.append(b)
 	m._toggle_order_stop(a.position)  # already a stop — removes it
-	eq(m.train_orders.size(), 1)
+	eq(m.trains[0].orders.size(), 1)
 	eq(m.undo_stack.size(), 1)
 	m._undo()
-	eq(m.train_orders.size(), 2)
-	eq(m.train_orders[0].position, a.position)  # back at its original index
-	eq(m.train_orders[1].position, b.position)
+	eq(m.trains[0].orders.size(), 2)
+	eq(m.trains[0].orders[0].position, a.position)  # back at its original index
+	eq(m.trains[0].orders[1].position, b.position)
 	m.free()
 
 func _test_order_pop_undo() -> void:
 	var m := _main()
 	var a := _town_with_station(m, 0.0)
 	var b := _town_with_station(m, 400.0)
-	m.train_orders.append(a)
-	m.train_orders.append(b)
+	var t := _add_train(m, a)
+	t.orders.append(a)
+	t.orders.append(b)
 	m._pop_order_stop()
-	eq(m.train_orders.size(), 1)
+	eq(m.trains[0].orders.size(), 1)
 	m._pop_order_stop()
-	eq(m.train_orders.size(), 0)
+	eq(m.trains[0].orders.size(), 0)
 	m._pop_order_stop()  # empty list: no push
 	eq(m.undo_stack.size(), 2)
 	m._undo()
-	eq(m.train_orders.size(), 1)
-	eq(m.train_orders[0].position, a.position)
+	eq(m.trains[0].orders.size(), 1)
+	eq(m.trains[0].orders[0].position, a.position)
 	m._undo()
-	eq(m.train_orders.size(), 2)
-	eq(m.train_orders[1].position, b.position)
+	eq(m.trains[0].orders.size(), 2)
+	eq(m.trains[0].orders[1].position, b.position)
 	m.free()
 
 func _test_two_actions() -> void:
@@ -253,6 +279,71 @@ func _test_two_actions() -> void:
 	m._undo()
 	eq(m.towns.size(), 0)
 	eq(m.next_color_index, 0)
+	m.free()
+
+func _test_place_signal_undo() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	m.placing_signal = true
+	m._try_place_signal(Vector2(300, 0))
+	is_true(m.placing_signal)  # mode stays active for the next signal
+	eq(m.network.segments.size(), 4)
+	eq(m.editor.find_signal_at(Vector2(300, 0)) != null, true)
+	eq(m.undo_stack.size(), 1)
+	m._undo()
+	eq(m.network.segments.size(), 2)
+	eq(m.editor.find_signal_at(Vector2(300, 0)), null)
+	m.free()
+
+func _test_failed_signal_no_push() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	m.placing_signal = true
+	m._try_place_signal(Vector2(300, 300))  # no track here
+	is_true(m.status_message != "")
+	eq(m.undo_stack.size(), 0)
+	m.free()
+
+func _test_remove_signal_undo() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	ed.place_signal(Vector2(300, 0))
+	m._right_click_at(Vector2(300, 0))  # removes the signal, not the track
+	eq(m.editor.find_signal_at(Vector2(300, 0)), null)
+	eq(m.network.segments.size(), 4)  # split pairs untouched
+	eq(m.undo_stack.size(), 1)
+	m._undo()
+	is_true(m.editor.find_signal_at(Vector2(300, 0)) != null)  # flag restored
+	m.free()
+
+func _test_cycle_signal_undo() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	m.placing_signal = true
+	m._signal_click(Vector2(300, 0), false)  # place (two-way)
+	m._signal_click(Vector2(300, 0), false)  # cycle to path
+	eq(m.editor.find_signal_at(Vector2(300, 0)).signal_kind, NetworkNode.SignalKind.PATH)
+	eq(m.undo_stack.size(), 2)
+	m._undo()
+	eq(m.editor.find_signal_at(Vector2(300, 0)).signal_kind, NetworkNode.SignalKind.TWO_WAY)
+	m.free()
+
+func _test_flip_signal_undo() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	m.placing_signal = true
+	m._signal_click(Vector2(300, 0), false)
+	var facing: Vector2 = m.editor.find_signal_at(Vector2(300, 0)).signal_facing
+	m._signal_click(Vector2(300, 0), true)  # shift+click: flip
+	eq(m.editor.find_signal_at(Vector2(300, 0)).signal_facing, -facing)
+	eq(m.undo_stack.size(), 2)
+	m._undo()
+	eq(m.editor.find_signal_at(Vector2(300, 0)).signal_facing, facing)
 	m.free()
 
 func _test_empty_stack() -> void:

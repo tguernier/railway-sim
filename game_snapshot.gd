@@ -1,7 +1,8 @@
-## A deep copy of the editable world state (towns, network, train orders),
+## A deep copy of the editable world state (towns, network, trains, money),
 ## used as an entry on the undo stack. Capture before a build action; restore
-## swaps the cloned objects in as the live state. Money, game state, and the
-## train are deliberately not snapshotted — undo is an editing-mode tool.
+## swaps the cloned objects in as the live state. Money and trains are
+## snapshotted because purchases and consist resizes happen in edit mode; the
+## undo stack is cleared at simulation start so earned money is never rewound.
 class_name GameSnapshot
 extends RefCounted
 
@@ -9,8 +10,12 @@ extends RefCounted
 var towns: Array[Town] = []
 ## Cloned track network.
 var network: TrackNetwork
-## Train orders, as references into the cloned towns.
-var train_orders: Array[Town] = []
+## Cloned trains (orders and home platforms rewired onto the clones).
+var trains: Array[Train] = []
+## Index of the selected train.
+var selected_train := 0
+## Player money at capture time.
+var money := 0.0
 ## Palette index for the next town placed.
 var next_color_index := 0
 
@@ -24,7 +29,10 @@ static func capture(main) -> GameSnapshot:
 
 	# Nodes first, so segments can be built with their mapped endpoints.
 	for node in main.network.nodes:
-		node_map[node] = NetworkNode.junction(node.position)
+		var node_clone := NetworkNode.junction(node.position)
+		node_clone.signal_kind = node.signal_kind
+		node_clone.signal_facing = node.signal_facing
+		node_map[node] = node_clone
 
 	# Bare segment clones. The curve is duplicated directly — a segment does
 	# not retain its waypoint list, so the curve is the source of truth.
@@ -46,6 +54,7 @@ static func capture(main) -> GameSnapshot:
 
 	# Towns, with stations/platforms rewired onto the cloned segments.
 	var town_map := {}
+	var platform_map := {}
 	for town in main.towns:
 		var town_clone := Town.new(town.position, town.color)
 		town_clone.radius = town.radius
@@ -64,12 +73,24 @@ static func capture(main) -> GameSnapshot:
 				if platform_clone.reverse_segment != null:
 					platform_clone.reverse_segment.platform = platform_clone
 				station_clone.platforms.append(platform_clone)
+				platform_map[platform] = platform_clone
 			town_clone.station = station_clone
 		town_map[town] = town_clone
 		snap.towns.append(town_clone)
 
-	for town in main.train_orders:
-		snap.train_orders.append(town_map[town])
+	# Trains carry no runtime state in edit mode — car count, home platform,
+	# and orders describe them fully.
+	for train in main.trains:
+		var train_clone := Train.new()
+		train_clone.car_count = train.car_count
+		if train.home_platform != null and platform_map.has(train.home_platform):
+			train_clone.home_platform = platform_map[train.home_platform]
+		for town in train.orders:
+			train_clone.orders.append(town_map[town])
+		snap.trains.append(train_clone)
+
+	snap.selected_train = main.selected_train
+	snap.money = main.money
 	snap.next_color_index = main.next_color_index
 	return snap
 
@@ -79,7 +100,10 @@ static func capture(main) -> GameSnapshot:
 func restore(main) -> void:
 	main.towns = towns
 	main.network = network
-	main.train_orders = train_orders
+	main.trains = trains
+	main.network.trains = trains
+	main.selected_train = clampi(selected_train, 0, maxi(trains.size() - 1, 0))
+	main.money = money
 	main.next_color_index = next_color_index
 	main.editor.network = network
 	# Hover references point into the discarded world; the next mouse motion
