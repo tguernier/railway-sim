@@ -41,6 +41,10 @@ func run_all() -> void:
 	_t("unroutable_stop_connected_loop", _test_unroutable_stop_connected)
 	_t("unroutable_stop_disconnected", _test_unroutable_stop_disconnected)
 	_t("unroutable_stop_on_wrap_leg", _test_unroutable_stop_wrap)
+	_t("two_way_signal_passable_both_directions", _test_two_way_signal_routable)
+	_t("one_way_signal_bars_reverse_direction", _test_one_way_signal_bars)
+	_t("one_way_signal_forces_other_branch", _test_one_way_forces_branch)
+	_t("unroutable_when_only_path_is_one_way_against", _test_one_way_unroutable_stop)
 
 func _test_add_stored() -> void:
 	var net := TrackNetwork.new()
@@ -247,6 +251,81 @@ func _test_unroutable_stop_disconnected() -> void:
 	var p1 := _platform(net, _node(0, 0), _node(120, 0))
 	var p2 := _platform(net, _node(500, 0), _node(620, 0))
 	eq(net.first_unroutable_stop([p1, p2]), 1)
+
+## A linked twin pair added to the network. Returns the forward segment.
+func _twin(net: TrackNetwork, a: NetworkNode, b: NetworkNode) -> TrackSegment:
+	var fwd := TrackSegment.new(a, b)
+	var rev := TrackSegment.new(b, a)
+	fwd.reverse = rev
+	rev.reverse = fwd
+	net.add_segment(fwd)
+	net.add_segment(rev)
+	return fwd
+
+func _test_two_way_signal_routable() -> void:
+	# a —— J —— b with a two-way signal at J: both directions still route.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(100, 0)
+	var b := _node(200, 0)
+	var aj := _twin(net, a, j)
+	var jb := _twin(net, j, b)
+	aj.exit_signal = true  # arriving at J eastbound
+	jb.reverse.exit_signal = true  # arriving at J westbound
+	eq(net.find_route(a, b).size(), 2)
+	eq(net.find_route(b, a).size(), 2)
+
+func _test_one_way_signal_bars() -> void:
+	# The same line with a one-way signal at J serving a→b only: the reverse
+	# direction may not pass J any more.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(100, 0)
+	var b := _node(200, 0)
+	var aj := _twin(net, a, j)
+	_twin(net, j, b)
+	aj.exit_signal = true
+	eq(net.find_route(a, b).size(), 2)
+	eq(net.find_route(b, a).size(), 0)
+
+func _test_one_way_forces_branch() -> void:
+	# A passing loop: two parallel branches between LW and LE, branch 1
+	# signalled eastbound-only, branch 2 westbound-only. Each direction is
+	# forced onto its own branch.
+	var net := TrackNetwork.new()
+	var w := _node(0, 0)
+	var lw := _node(100, 0)
+	var le := _node(300, 0)
+	var e := _node(400, 0)
+	_twin(net, w, lw)
+	var branch1 := _twin(net, lw, le)
+	var branch2 := _twin(net, lw, le)
+	_twin(net, le, e)
+	branch1.exit_signal = true  # one-way signal at LE serving eastbound
+	branch2.reverse.exit_signal = true  # one-way signal at LW serving westbound
+	var east := net.find_route(w, e)
+	eq(east.size(), 3)
+	is_true(east.has(branch1))
+	is_false(east.has(branch2))
+	var west := net.find_route(e, w)
+	eq(west.size(), 3)
+	is_true(west.has(branch2.reverse))
+	is_false(west.has(branch1.reverse))
+
+func _test_one_way_unroutable_stop() -> void:
+	# p1(a-b) —— p2(c-d) joined by one twin pair; the loop validates until a
+	# one-way signal turns the middle eastbound-only, breaking the wrap leg.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var b := _node(120, 0)
+	var c := _node(240, 0)
+	var d := _node(360, 0)
+	var p1 := _platform(net, a, b)
+	var p2 := _platform(net, c, d)
+	var link := _twin(net, b, c)
+	eq(net.first_unroutable_stop([p1, p2]), -1)
+	link.exit_signal = true  # one-way at c serving b→c only
+	eq(net.first_unroutable_stop([p1, p2]), 0)
 
 func _test_unroutable_stop_wrap() -> void:
 	# One-way link p1 -> p2 but no way back: the loop fails on the wrap-around

@@ -50,6 +50,10 @@ func run_all() -> void:
 	_t("blocked_entry_halts_at_boundary", _test_blocked_entry_halts)
 	_t("blocked_entry_proceeds_after_release", _test_blocked_entry_proceeds)
 	_t("turnaround_keeps_span_held", _test_turnaround_keeps_held)
+	_t("extension_stops_at_first_signal", _test_extend_stops_at_signal)
+	_t("extension_failure_keeps_limit_and_records_blocker", _test_extend_atomic)
+	_t("opposite_direction_signal_ignored", _test_extend_ignores_opposite_signal)
+	_t("halts_at_signal_until_path_frees", _test_halts_at_signal)
 
 func _test_no_route() -> void:
 	var tr := Train.new()
@@ -412,6 +416,62 @@ func _test_turnaround_keeps_held() -> void:
 	eq(pair[1].reserved_by, tr)
 	var other := Train.new()
 	is_false(other.try_reserve([pair[0]]))  # twin exclusion holds the span
+
+func _test_extend_stops_at_signal() -> void:
+	var tr := Train.new()
+	var segs := _route_of_three(tr)
+	segs[1].exit_signal = true
+	is_true(tr.try_extend_reservation())
+	# The slice runs through the signalled segment and no further.
+	eq(tr.limit_index, 1)
+	eq(segs[0].reserved_by, tr)
+	eq(segs[1].reserved_by, tr)
+	eq(segs[2].reserved_by, null)
+	# The next extension takes the rest of the route.
+	is_true(tr.try_extend_reservation())
+	eq(tr.limit_index, 2)
+	eq(segs[2].reserved_by, tr)
+
+func _test_extend_atomic() -> void:
+	var tr := Train.new()
+	var other := Train.new()
+	var segs := _route_of_three(tr)
+	segs[1].exit_signal = true
+	other.try_reserve([segs[2]])
+	is_true(tr.try_extend_reservation())  # up to the signal is free
+	eq(tr.limit_index, 1)
+	is_false(tr.try_extend_reservation())  # beyond it is not
+	eq(tr.limit_index, 1)  # unchanged on failure
+	eq(segs[2].reserved_by, other)
+	eq(tr.blocked_by, other)  # wait-for edge recorded
+
+func _test_extend_ignores_opposite_signal() -> void:
+	# A one-way signal for the opposite direction lives on the reverse twin;
+	# it is not a waiting point for this train, so the slice runs past it.
+	var tr := Train.new()
+	var segs := _route_of_three(tr)
+	var rev := _seg(segs[1].node_end, segs[1].node_start)
+	segs[1].reverse = rev
+	rev.reverse = segs[1]
+	rev.exit_signal = true
+	is_true(tr.try_extend_reservation())
+	eq(tr.limit_index, 2)  # reserved to the end of the route
+
+func _test_halts_at_signal() -> void:
+	var tr := Train.new()
+	var other := Train.new()
+	var segs := _route_of_three(tr)
+	segs[0].exit_signal = true
+	other.try_reserve([segs[2]])
+	tr.move(1.0)  # 150 px — would cross into the second segment
+	eq(tr.route_index, 0)
+	eq(tr.segment_progress, 1.0)  # halted at the signal
+	is_true(tr.waiting_for_track)
+	other.release_all()
+	tr.move(2.0)  # the retry reserves the rest and the train rolls on
+	is_false(tr.waiting_for_track)
+	is_true(tr.has_completed_route())
+	eq(segs[2].reserved_by, tr)
 
 func _test_resume_forward_tail() -> void:
 	# Roll-forward departure: the platform segment is prepended, so the tail

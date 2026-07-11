@@ -179,8 +179,9 @@ func cancel() -> void:
 # --- Track operations ---
 
 ## Create a bidirectional track between two network nodes. The two segments
-## are linked as each other's reverse twin.
-func create_bidirectional_track(from: NetworkNode, to: NetworkNode, wps: Array[Vector2]) -> void:
+## are linked as each other's reverse twin. Returns the forward segment
+## (from→to); its twin is reachable via .reverse.
+func create_bidirectional_track(from: NetworkNode, to: NetworkNode, wps: Array[Vector2]) -> TrackSegment:
 	var fwd := TrackSegment.new(from, to, wps)
 	var reversed_wp: Array[Vector2] = []
 	for i in range(wps.size() - 1, -1, -1):
@@ -190,6 +191,7 @@ func create_bidirectional_track(from: NetworkNode, to: NetworkNode, wps: Array[V
 	rev.reverse = fwd
 	network.add_segment(fwd)
 	network.add_segment(rev)
+	return fwd
 
 ## Split an existing track at a hit point, creating a junction. Returns the new
 ## junction node, or null if the segment is a station platform.
@@ -213,8 +215,13 @@ func split_track_at_hit(hit: Array) -> NetworkNode:
 	if reverse != null:
 		network.remove_segment(reverse)
 
-	create_bidirectional_track(seg.node_start, junction, wp_first)
-	create_bidirectional_track(junction, seg.node_end, wp_second)
+	var first := create_bidirectional_track(seg.node_start, junction, wp_first)
+	var second := create_bidirectional_track(junction, seg.node_end, wp_second)
+	# A signal at either end of the split track stays with the half that still
+	# ends there.
+	second.exit_signal = seg.exit_signal
+	if reverse != null:
+		first.reverse.exit_signal = reverse.exit_signal
 
 	return junction
 
@@ -321,9 +328,14 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 	if reverse != null:
 		network.remove_segment(reverse)
 	if not snap_start:
-		create_bidirectional_track(seg.node_start, entry, _sample_curve_waypoints(seg, 0.0, t_start))
+		var approach_in := create_bidirectional_track(seg.node_start, entry,
+			_sample_curve_waypoints(seg, 0.0, t_start))
+		if reverse != null:
+			approach_in.reverse.exit_signal = reverse.exit_signal
 	if not snap_end:
-		create_bidirectional_track(exit, seg.node_end, _sample_curve_waypoints(seg, t_end, 1.0))
+		var approach_out := create_bidirectional_track(exit, seg.node_end,
+			_sample_curve_waypoints(seg, t_end, 1.0))
+		approach_out.exit_signal = seg.exit_signal
 	var reversed_wps: Array[Vector2] = []
 	for i in range(platform_wps.size() - 1, -1, -1):
 		reversed_wps.append(platform_wps[i])
@@ -347,6 +359,58 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 	town.station = station
 	last_error = ""
 	return station
+
+# --- Signals ---
+
+## Place a path signal on the track at a screen position, or cycle the signal
+## whose junction is clicked: two-way → one-way → other one-way → removed.
+## A new placement splits the track and flags both directions (a two-way
+## signal). Returns true if anything changed; last_error explains a false.
+func place_or_cycle_signal(pos: Vector2) -> bool:
+	var junction := find_junction_at(pos)
+	if junction != null:
+		return _cycle_signal_at(junction)
+	var hit := find_track_at(pos)
+	if hit.size() == 0:
+		last_error = "Click on a track to place a signal"
+		return false
+	var seg: TrackSegment = hit[0]
+	if seg.is_platform_segment():
+		last_error = "Platforms are their own waiting points — no signals there"
+		return false
+	var node := split_track_at_hit(hit)
+	if node == null:
+		return false
+	for arriving in network.get_incoming(node):
+		arriving.exit_signal = true
+	last_error = ""
+	return true
+
+## Cycle the signal at a junction. Only plain through-nodes qualify — exactly
+## two directed segments arriving, one per direction of the same physical
+## track (signal splits and old waypoint splits both produce these).
+func _cycle_signal_at(junction: NetworkNode) -> bool:
+	var arriving: Array = []
+	for seg in network.get_incoming(junction):
+		if not seg.is_platform_segment():
+			arriving.append(seg)
+	if arriving.size() != 2:
+		last_error = "Signals only fit on plain track, not junctions"
+		return false
+	last_error = ""
+	var a: TrackSegment = arriving[0]
+	var b: TrackSegment = arriving[1]
+	if a.exit_signal and b.exit_signal:
+		b.exit_signal = false  # two-way → one-way
+	elif a.exit_signal:
+		a.exit_signal = false  # one-way → the other one-way
+		b.exit_signal = true
+	elif b.exit_signal:
+		b.exit_signal = false  # one-way → removed (the junction remains)
+	else:
+		a.exit_signal = true  # bare junction → two-way signal
+		b.exit_signal = true
+	return true
 
 # --- Hit testing ---
 

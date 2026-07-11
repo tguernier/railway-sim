@@ -11,6 +11,7 @@ func run_all() -> void:
 	_t("clone_roster_plans_mapped", _test_roster_mapped)
 	_t("clone_routes_across_adjacency", _test_routing)
 	_t("clone_isolated_junction_survives", _test_isolated_junction)
+	_t("clone_signal_flags_preserved", _test_signal_flags)
 	_t("mutating_original_leaves_clone_untouched", _test_isolation)
 	_t("restore_swaps_state_into_main", _test_restore)
 
@@ -151,6 +152,16 @@ func _test_isolated_junction() -> void:
 	m.network.add_node(NetworkNode.junction(Vector2(50, 500)))
 	var snap := GameSnapshot.capture(m)
 	is_true(_node_at(snap.network, Vector2(50, 500)) != null)
+	m.free()
+
+func _test_signal_flags() -> void:
+	var m := _main()
+	_build_world(m)
+	_seg_between(m.network, Vector2(0, 0), Vector2(600, 0)).exit_signal = true
+	var snap := GameSnapshot.capture(m)
+	var clone := _seg_between(snap.network, Vector2(0, 0), Vector2(600, 0))
+	is_true(clone.exit_signal)
+	is_false(clone.reverse.exit_signal)  # a one-way signal stays one-way
 	m.free()
 
 func _test_isolation() -> void:

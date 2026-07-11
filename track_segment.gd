@@ -31,6 +31,12 @@ var reserved_by: Train:
 	get: return _reserved_by_ref.get_ref() as Train if _reserved_by_ref != null else null
 	set(t): _reserved_by_ref = weakref(t) if t != null else null
 
+## Whether a train traversing this segment finds a path signal at its exit
+## (node_end). The signal is a safe waiting point: a train halts there until
+## it can reserve the track through to the next one. A two-way signal sets
+## this flag on both twins; a one-way signal on only one.
+var exit_signal := false
+
 ## Whether this segment is occupied by a station platform.
 func is_platform_segment() -> bool:
 	return platform != null

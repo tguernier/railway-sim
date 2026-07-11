@@ -40,9 +40,20 @@ var dwell_remaining: float = 0.0
 var stop_progress: float = -1.0
 ## Segments this train holds movement reservations on. Array[TrackSegment]
 var reserved: Array = []
-## True while the train is halted because the next route segment is held by
-## another train (retried every move).
+## Highest route index covered by the current reservation; the head may not
+## advance past the end of route[limit_index]. -1 until the first extension.
+var limit_index := -1
+## True while the train is halted because the path ahead could not be
+## reserved (retried every move).
 var waiting_for_track := false
+
+## The train whose reservation blocked this train's last failed reserve
+## attempt — the edge of the wait-for graph used for deadlock detection.
+## Weakref: two mutually blocked trains must not keep each other alive.
+var _blocked_by_ref: WeakRef = null
+var blocked_by: Train:
+	get: return _blocked_by_ref.get_ref() as Train if _blocked_by_ref != null else null
+	set(t): _blocked_by_ref = weakref(t) if t != null else null
 
 ## Ordered list of town stops the train visits in a loop. Array[Town]
 var orders: Array[Town] = []
@@ -66,6 +77,7 @@ func set_route(new_route: Array) -> void:
 	history = []
 	boarded_this_leg = false
 	stop_progress = -1.0
+	limit_index = -1
 	waiting_for_track = false
 
 ## Check if the train has a route.
@@ -124,13 +136,20 @@ func move(delta: float) -> void:
 			distance = 0.0
 	_trim_history()
 
-## Advance the head onto the next route segment if its reservation can be
-## taken; otherwise flag the train as waiting for track. The traversed segment
-## moves into the history so trailing cars can still be positioned on it.
+## Advance the head onto the next route segment. Crossing past the reserved
+## limit first requires extending the reservation to the next safe waiting
+## point; on failure the train halts at the boundary — the exit of
+## route[limit_index] is a signal (or the start of the route), which is
+## exactly where it may stand. The traversed segment moves into the history
+## so trailing cars can still be positioned on it.
 func _advance_to_next_segment(seg: TrackSegment) -> bool:
-	if not try_reserve([route[route_index + 1]]):
-		waiting_for_track = true
-		return false
+	# Loop: the first extension after dispatch may stop at a signal on the
+	# current segment itself, still short of the boundary being crossed.
+	# Every successful extension raises limit_index, so this terminates.
+	while route_index + 1 > limit_index:
+		if not try_extend_reservation():
+			waiting_for_track = true
+			return false
 	history.append(seg)
 	route_index += 1
 	segment_progress = 0.0
@@ -163,6 +182,8 @@ func resume_from_stop(prev_seg: TrackSegment, prev_progress: float, reverse_seg:
 	else:
 		route.insert(0, prev_seg)
 		segment_progress = prev_progress
+		if limit_index >= 0:
+			limit_index += 1  # keep the reserved limit on the same segment
 
 ## Position and heading at a point back_offset px behind the head, walking
 ## back through the current segment and then the history. Clamps at the
@@ -249,27 +270,58 @@ func board_from(town: Town) -> void:
 
 # --- Track reservations ---
 
+## Extend the reservation from just past limit_index through the next safe
+## waiting point on the route: the first segment whose exit carries a signal
+## for this direction of travel, or the end of the route (the platform stop).
+## The whole slice is reserved atomically; on failure limit_index and the
+## held reservations are unchanged. Returns true if the path ahead is covered.
+func try_extend_reservation() -> bool:
+	if limit_index >= route.size() - 1:
+		return true
+	var slice: Array = []
+	var end := limit_index
+	for i in range(limit_index + 1, route.size()):
+		slice.append(route[i])
+		end = i
+		if route[i].exit_signal:
+			break
+	if not try_reserve(slice):
+		return false
+	limit_index = end
+	return true
+
 ## Reserve every segment for this train, all-or-nothing: if any segment (or
-## its reverse twin) is held by another train, nothing is reserved.
+## its reverse twin) is held by another train, nothing is reserved and
+## blocked_by records the holder.
 ##
 ## segs: Array[TrackSegment]
 func try_reserve(segs: Array) -> bool:
 	for seg in segs:
-		if is_blocked(seg):
+		var blocker := blocking_train(seg)
+		if blocker != null:
+			blocked_by = blocker
 			return false
 	for seg in segs:
 		if seg.reserved_by != self:
 			seg.reserved_by = self
 			reserved.append(seg)
+	blocked_by = null
 	return true
+
+## The other train making a segment unavailable to this one — the holder of
+## the segment or of its reverse twin. Null when the segment is free.
+func blocking_train(seg: TrackSegment) -> Train:
+	if seg.reserved_by != null and seg.reserved_by != self:
+		return seg.reserved_by
+	var rev := seg.reverse
+	if rev != null and rev.reserved_by != null and rev.reserved_by != self:
+		return rev.reserved_by
+	return null
 
 ## Whether a segment is unavailable to this train: it or its reverse twin is
 ## reserved by a different train.
 func is_blocked(seg: TrackSegment) -> bool:
-	if seg.reserved_by != null and seg.reserved_by != self:
-		return true
-	var rev := seg.reverse
-	return rev != null and rev.reserved_by != null and rev.reserved_by != self
+	return blocking_train(seg) != null
 
 ## Release one held segment (no-op unless this train is the holder).
 func release(seg: TrackSegment) -> void:

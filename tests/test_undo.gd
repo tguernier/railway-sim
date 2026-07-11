@@ -10,6 +10,8 @@ func run_all() -> void:
 	_t("split_undo_restores_original_pair", _test_split_undo)
 	_t("place_station_undo", _test_place_station_undo)
 	_t("failed_station_burns_no_undo", _test_failed_station_no_push)
+	_t("place_signal_undo_and_cycle_undo", _test_place_signal_undo)
+	_t("failed_signal_burns_no_undo", _test_failed_signal_no_push)
 	_t("delete_track_undo_restores_curve", _test_delete_track_undo)
 	_t("delete_miss_and_platform_burn_no_undo", _test_delete_no_push)
 	_t("remove_town_undo_restores_station_and_order", _test_remove_town_undo)
@@ -140,6 +142,44 @@ func _test_failed_station_no_push() -> void:
 	m.placing_station = true
 	m._try_place_station(Vector2(300, 300))  # no track here
 	is_true(m.placing_station)
+	is_true(m.status_message != "")
+	eq(m.undo_stack.size(), 0)
+	m.free()
+
+## Segments currently carrying a signal for their direction of travel.
+func _signalled(m: Node2D) -> int:
+	var n := 0
+	for seg in m.network.segments:
+		if seg.exit_signal:
+			n += 1
+	return n
+
+func _test_place_signal_undo() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	m.placing_signal = true
+	m._try_place_signal(Vector2(300, 0))  # split + two-way signal
+	is_true(m.placing_signal)  # the mode stays active
+	eq(m.network.segments.size(), 4)
+	eq(_signalled(m), 2)
+	eq(m.undo_stack.size(), 1)
+	m._try_place_signal(Vector2(300, 0))  # cycle to one-way
+	eq(_signalled(m), 1)
+	eq(m.undo_stack.size(), 2)
+	m._undo()  # the cycle is its own undo step
+	eq(_signalled(m), 2)
+	m._undo()  # placement undone: split junction and flags both gone
+	eq(_signalled(m), 0)
+	eq(m.network.segments.size(), 2)
+	m.free()
+
+func _test_failed_signal_no_push() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(600, 0), [])
+	m.placing_signal = true
+	m._try_place_signal(Vector2(300, 300))  # no track here
 	is_true(m.status_message != "")
 	eq(m.undo_stack.size(), 0)
 	m.free()

@@ -51,6 +51,22 @@ func cleanup_orphan(node: NetworkNode) -> bool:
 		return true
 	return false
 
+## Whether a directed segment may not be entered because the junction at its
+## start hosts a one-way signal facing the other way — as in OpenTTD, a
+## one-way path signal is a hard "no entry" for the unserved direction, which
+## is what lets players make passing-loop branches directional. The segment's
+## twin arriving at that junction carries the signal; the direction is barred
+## unless some other arriving segment (the through continuation) carries one
+## too, which would make the signal two-way.
+func one_way_against(seg: TrackSegment) -> bool:
+	var twin := seg.reverse
+	if twin == null or not twin.exit_signal:
+		return false
+	for arriving in get_incoming(seg.node_start):
+		if arriving != twin and arriving.exit_signal:
+			return false  # a signal serves this direction too — two-way
+	return true
+
 ## Get all departure angles (radians) of outgoing segments at a node.
 func departure_angles_at(node: NetworkNode) -> Array[float]:
 	var angles: Array[float] = []
@@ -109,7 +125,8 @@ func _route_length(route: Array) -> float:
 		total += seg.length()
 	return total
 
-## Find the shortest route between two nodes using Dijkstra (weighted by segment length).
+## Find the shortest route between two nodes using Dijkstra (weighted by
+## segment length). Directions barred by a one-way signal are never taken.
 func find_route(from: NetworkNode, to: NetworkNode) -> Array:
 	if from == to:
 		return []
@@ -140,6 +157,8 @@ func find_route(from: NetworkNode, to: NetworkNode) -> Array:
 			return path
 
 		for seg in get_outgoing(node):
+			if one_way_against(seg):
+				continue  # a one-way signal bars entry in this direction
 			var next_node: NetworkNode = seg.node_end
 			if visited.has(next_node):
 				continue

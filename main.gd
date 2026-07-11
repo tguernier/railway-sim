@@ -29,6 +29,16 @@ var mouse_pos := Vector2.ZERO
 var editing_orders := false
 ## Whether the player is placing a station.
 var placing_station := false
+## Whether the player is placing/cycling path signals.
+var placing_signal := false
+## Whether reserved track is tinted per-train during simulation (V toggles).
+var show_reservations := false
+## Trains flagged as deadlocked by the last check (empty when traffic flows).
+var deadlocked_trains: Array = []
+## Seconds since the last deadlock check.
+var _deadlock_timer := 0.0
+## How long every train has been simultaneously blocked, in seconds.
+var _all_blocked_time := 0.0
 ## Per-train plans (orders + car count) built in edit mode, one per train.
 var roster: Array[TrainPlan] = []
 ## Index into roster of the train whose orders/cars are being edited.
@@ -65,6 +75,11 @@ const WAYPOINT_RADIUS := 5.0
 const JUNCTION_RADIUS := 8.0
 ## How long status messages stay on screen, in seconds.
 const STATUS_DURATION := 3.0
+## Seconds between deadlock checks (walking the wait-for graph is not free).
+const DEADLOCK_CHECK_INTERVAL := 1.0
+## Every train blocked for this long is treated as a deadlock even when the
+## wait-for graph shows no cycle (net for cases the graph misses).
+const ALL_BLOCKED_TIMEOUT := 10.0
 ## Price of each train car beyond the first, charged at simulation start.
 const COST_PER_CAR := 150.0
 ## Price of each train beyond the first, charged at simulation start.
@@ -95,6 +110,10 @@ func _reset_game() -> void:
 	hovered_junction = null
 	editing_orders = false
 	placing_station = false
+	placing_signal = false
+	deadlocked_trains = []
+	_deadlock_timer = 0.0
+	_all_blocked_time = 0.0
 	roster = [TrainPlan.new()]
 	selected_train = 0
 	next_color_index = 0
@@ -151,6 +170,11 @@ func _input(event: InputEvent) -> void:
 		_reset_game()
 		return
 
+	# V toggles the reservation overlay (drawn while simulating).
+	if event is InputEventKey and event.pressed and event.keycode == KEY_V:
+		show_reservations = not show_reservations
+		return
+
 	if state == GameState.EDITING:
 		_handle_edit_input(event)
 
@@ -169,6 +193,9 @@ func _handle_edit_input(event: InputEvent) -> void:
 		return
 	if placing_station:
 		_handle_station_input(event)
+		return
+	if placing_signal:
+		_handle_signal_input(event)
 		return
 
 	if event is InputEventMouseButton and event.pressed:
@@ -196,6 +223,9 @@ func _handle_edit_input(event: InputEvent) -> void:
 			KEY_P:
 				if not editor.drawing:
 					placing_station = true
+			KEY_S:
+				if not editor.drawing:
+					placing_signal = true
 			KEY_T:
 				if not editor.drawing:
 					_buy_train()
@@ -332,6 +362,27 @@ func _handle_station_input(event: InputEvent) -> void:
 			KEY_ESCAPE, KEY_P:
 				placing_station = false
 
+## Handles inputs while placing/cycling path signals.
+func _handle_signal_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			_try_place_signal(get_local_mouse_position())
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			placing_signal = false
+
+	if event is InputEventKey and event.pressed:
+		match event.keycode:
+			KEY_ESCAPE, KEY_S:
+				placing_signal = false
+
+## Place or cycle a signal at a position, as one undo step if it succeeds.
+## The mode stays active so several signals can be placed in a row.
+func _try_place_signal(pos: Vector2) -> void:
+	_push_undo()
+	if not editor.place_or_cycle_signal(pos):
+		_discard_undo()
+		_show_status(editor.last_error)
+
 ## Build a station at a position, as one undo step if it succeeds.
 func _try_place_station(pos: Vector2) -> void:
 	_push_undo()
@@ -465,6 +516,10 @@ func _start_simulation() -> void:
 	state = GameState.SIMULATING
 	editing_orders = false
 	placing_station = false
+	placing_signal = false
+	deadlocked_trains = []
+	_deadlock_timer = 0.0
+	_all_blocked_time = 0.0
 	trains = []
 	for plan in roster:
 		var tr := Train.new()
@@ -482,6 +537,11 @@ func _start_simulation() -> void:
 			tr.resume_from_stop(start_platform.segment,
 				_stop_point(tr, start_platform.segment), start_platform.reverse_segment)
 			tr.try_reserve([tr.current_segment()])
+	# Only after every train's footprint is seeded may anyone reserve ahead —
+	# extending earlier could claim a path through a not-yet-spawned train.
+	# A failure just means the train starts out waiting (retried every move).
+	for tr in trains:
+		tr.try_extend_reservation()
 
 ## Dispatch a train toward its next order stop's platform via Dijkstra.
 ## Orders are validated before the simulation starts, but a leg can still
@@ -521,6 +581,8 @@ func _stop_simulation(msg: String) -> void:
 	for tr in trains:
 		tr.release_all()
 	trains = []
+	deadlocked_trains = []
+	_all_blocked_time = 0.0
 	_show_status(msg)
 
 ## Handle 1 simulation tick.
@@ -539,6 +601,8 @@ func _process(delta: float) -> void:
 			if state != GameState.SIMULATING:
 				break  # a dispatch failure stopped the simulation
 
+		if state == GameState.SIMULATING:
+			_update_deadlock_detection(delta)
 		frame_count += 1
 
 	queue_redraw()
@@ -555,6 +619,48 @@ func _update_train(tr: Train, delta: float) -> void:
 			_arrive_at_platform(tr)
 	elif tr.has_completed_route() and tr.boarded_this_leg:
 		_dispatch_to_next_order(tr, tr.route[-1].node_end)
+
+## Deadlock detection. Path reservation prevents collisions, not deadlocks:
+## with signals in the wrong places trains can wait on each other in a cycle.
+## Once per DEADLOCK_CHECK_INTERVAL, walk the wait-for graph (each blocked
+## train points at the train holding what it needs) — revisiting a train on
+## the walk means a cycle. As a net for cases the graph misses (e.g. stale
+## blocker edges), every train being blocked for ALL_BLOCKED_TIMEOUT counts
+## too. Deadlocked trains are flagged and the player notified; the simulation
+## keeps running (the player resolves it with R or better signals).
+func _update_deadlock_detection(delta: float) -> void:
+	var all_blocked := trains.size() > 0
+	for tr in trains:
+		if not tr.waiting_for_track:
+			all_blocked = false
+			break
+	_all_blocked_time = _all_blocked_time + delta if all_blocked else 0.0
+	_deadlock_timer += delta
+	if _deadlock_timer < DEADLOCK_CHECK_INTERVAL:
+		return
+	_deadlock_timer = 0.0
+	deadlocked_trains = _find_deadlock_cycle()
+	if deadlocked_trains.is_empty() and _all_blocked_time > ALL_BLOCKED_TIMEOUT:
+		deadlocked_trains = trains.duplicate()
+	if not deadlocked_trains.is_empty():
+		_show_status("Deadlock — trains are waiting on each other (R to reset)")
+
+## The trains forming a wait-for cycle, or [] when none exists. A walk only
+## follows blocked trains, so a queue behind a moving or dwelling leader
+## terminates and is not flagged.
+func _find_deadlock_cycle() -> Array:
+	for tr in trains:
+		if not tr.waiting_for_track:
+			continue
+		var walk: Array = []
+		var cur: Train = tr
+		while cur != null and cur.waiting_for_track:
+			var pos := walk.find(cur)
+			if pos >= 0:
+				return walk.slice(pos)
+			walk.append(cur)
+			cur = cur.blocked_by
+	return []
 
 ## The dwell is over: dispatch the next leg while the train sits at its stop
 ## point. When the leg leaves back the way the train came in (a dead-end
@@ -576,6 +682,11 @@ func _depart_from_stop(tr: Train) -> void:
 		# Sequential train updates mean nobody can have grabbed it in between.
 		if not tr.try_reserve([tr.current_segment()]):
 			_stop_simulation("Track conflict at a station — simulation stopped")
+			return
+		# Reserve out to the first safe waiting point. On failure the train
+		# keeps sitting at the platform — itself a safe waiting point — and
+		# retries every move.
+		tr.try_extend_reservation()
 
 ## A train has halted at its stop point (the middle of the target platform):
 ## unload, board, and wait out the dwell time.
@@ -593,8 +704,11 @@ func _arrive_at_platform(tr: Train) -> void:
 func _draw() -> void:
 	_draw_towns()
 	_draw_tracks()
+	if state == GameState.SIMULATING and show_reservations:
+		_draw_reservations()
 	_draw_platforms()
 	_draw_junctions()
+	_draw_signals()
 
 	if state == GameState.EDITING:
 		_draw_editor_overlay()
@@ -615,6 +729,44 @@ func _draw_tracks() -> void:
 		if not drawn.has(key_a) and not drawn.has(key_b):
 			draw_polyline(seg.get_baked_points(), Color.GRAY, 3.0)
 			drawn[key_a] = true
+
+## Tint every reserved segment in its holder's colour (V toggles) — makes
+## signal layouts debuggable and shows each train's claimed path.
+func _draw_reservations() -> void:
+	for i in range(trains.size()):
+		var color: Color = TRAIN_COLORS[i % TRAIN_COLORS.size()]
+		for seg in trains[i].reserved:
+			var points: PackedVector2Array = seg.get_baked_points()
+			if points.size() >= 2:
+				draw_polyline(points, Color(color, 0.35), 7.0)
+
+## Draw path signals as a pole-and-lamp dot beside the exit of each signalled
+## segment, on the right-hand side of the direction served (so one-way
+## signals read correctly). Red by default, green while a reservation passes
+## through the signal.
+func _draw_signals() -> void:
+	for seg in network.segments:
+		if not seg.exit_signal:
+			continue
+		var total: float = seg.length()
+		if total <= 0.0:
+			continue
+		var t := clampf(1.0 - 10.0 / total, 0.0, 1.0)
+		var pos: Vector2 = seg.position_at(t)
+		var side := Vector2.from_angle(seg.angle_at(t)).rotated(PI / 2.0)
+		var lamp := pos + side * 9.0
+		draw_line(pos + side * 4.0, lamp, Color.DIM_GRAY, 2.0)
+		var lit := Color.LIME_GREEN if _signal_is_green(seg) else Color.RED
+		draw_circle(lamp, 3.5, lit)
+
+## A signal shows green while its holder's reservation continues past it —
+## the train may traverse the signalled segment and at least one more.
+func _signal_is_green(seg: TrackSegment) -> bool:
+	var tr: Train = seg.reserved_by
+	if tr == null:
+		return false
+	var idx: int = tr.route.find(seg)
+	return idx >= 0 and idx < tr.limit_index
 
 ## Draw station platforms alongside their track segments.
 func _draw_platforms() -> void:
@@ -733,6 +885,9 @@ func _draw_editor_overlay() -> void:
 	elif placing_station:
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20),
 			"STATION: Click a track inside a town's circle | ESC/P to cancel")
+	elif placing_signal:
+		draw_string(ThemeDB.fallback_font, Vector2(10, 20),
+			"SIGNALS: Click a track to place | Click a signal to cycle two-way > one-way > remove | ESC/S to finish")
 	elif editor.drawing:
 		_draw_curvature_preview()
 		for wp in editor.waypoints:
@@ -747,7 +902,7 @@ func _draw_editor_overlay() -> void:
 				hint_text = "CURVE TOO TIGHT — add waypoints for a gentler bend | " + hint_text
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint_text)
 	else:
-		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | RIGHT-CLICK to delete | U to undo | O to edit orders | R to reset"
+		var hint := "SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | S to place signals | RIGHT-CLICK to delete | U to undo | O to edit orders | R to reset"
 		if _ready_to_start():
 			hint += " | SPACE to start"
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20), hint)
@@ -885,10 +1040,14 @@ func _draw_dashed_circle(center: Vector2, radius: float, color: Color, width: fl
 		var a0 := TAU * float(i) / float(dashes)
 		draw_arc(center, radius, a0, a0 + TAU / float(dashes) * 0.6, 4, color, width)
 
-## Draw all running trains, each in its roster colour.
+## Draw all running trains, each in its roster colour. Deadlocked trains get
+## a red ring so the player can see who is waiting on whom.
 func _draw_trains() -> void:
 	for i in range(trains.size()):
-		_draw_train(trains[i], TRAIN_COLORS[i % TRAIN_COLORS.size()])
+		var tr: Train = trains[i]
+		_draw_train(tr, TRAIN_COLORS[i % TRAIN_COLORS.size()])
+		if deadlocked_trains.has(tr):
+			draw_arc(tr.current_position(), 24.0, 0, TAU, 32, Color.RED, 2.5)
 
 ## Draw one train as a chain of cars, each sampled at its own point along the
 ## track so the consist bends with the curves.
@@ -912,10 +1071,17 @@ func _draw_train(tr: Train, color: Color) -> void:
 		draw_string(ThemeDB.fallback_font, head_pos + Vector2(-30, 28),
 			"Boarding...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.WHITE)
 	elif tr.waiting_for_track:
-		draw_string(ThemeDB.fallback_font, head_pos + Vector2(-30, 28),
-			"Waiting...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.RED)
+		draw_string(ThemeDB.fallback_font, head_pos + Vector2(-40, 28),
+			"Waiting for path...", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color.RED)
 
-## Draw HUD.
+## Draw HUD: money plus each train's passenger load in its colour.
 func _draw_hud() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-		"Money: %d | Trains: %d | R to reset" % [money, trains.size()])
+		"Money: %d | R to reset | V to toggle reservations" % money)
+	var x := 10.0
+	for i in range(trains.size()):
+		var tr: Train = trains[i]
+		var label := "Train %d: %d/%d" % [i + 1, tr.passengers_on_board, tr.capacity]
+		draw_string(ThemeDB.fallback_font, Vector2(x, 40), label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, TRAIN_COLORS[i % TRAIN_COLORS.size()])
+		x += 130.0
