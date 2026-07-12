@@ -2,6 +2,12 @@
 class_name TrackNetwork
 extends RefCounted
 
+## Cost added to a segment unavailable to the routing train. Larger than any
+## plausible route length, so one blocked segment always outweighs any free
+## detour, while two equally-blocked routes still compare by real length
+## beneath the penalty.
+const BLOCKED_PENALTY := 10000.0
+
 ## All track segments in the network.
 var segments: Array[TrackSegment] = []
 ## All junction nodes in the network.
@@ -77,18 +83,20 @@ func departure_angles_at(node: NetworkNode) -> Array[float]:
 ## Find the shortest route from a node to a station platform. The route always
 ## ends with a traversal of the platform segment (entering at whichever end
 ## gives the shorter path), so the train passes alongside the platform and
-## finishes at its far end.
-func find_route_to_platform(from: NetworkNode, platform: Platform) -> Array:
+## finishes at its far end. With for_train given, both candidate entry ends
+## are costed with reservation penalties, so the entry-end choice is
+## traffic-aware too.
+func find_route_to_platform(from: NetworkNode, platform: Platform, for_train: Train = null) -> Array:
 	var entry := platform.segment.node_start
 	var exit := platform.segment.node_end
 	if from == entry:
 		return [platform.segment]
 	if from == exit:
 		return [platform.reverse_segment]
-	var route_a := find_route(from, entry)
-	var route_b := find_route(from, exit)
-	var len_a := _route_length(route_a) if route_a.size() > 0 else INF
-	var len_b := _route_length(route_b) if route_b.size() > 0 else INF
+	var route_a := find_route(from, entry, for_train)
+	var route_b := find_route(from, exit, for_train)
+	var len_a := _route_cost(route_a, for_train) if route_a.size() > 0 else INF
+	var len_b := _route_cost(route_b, for_train) if route_b.size() > 0 else INF
 	if is_inf(len_a) and is_inf(len_b):
 		return []
 	if len_a <= len_b:
@@ -118,16 +126,22 @@ func first_unroutable_stop(platforms: Array) -> int:
 		from_node = route[-1].node_end
 	return -1
 
-## Total length of a route (array of segments).
-func _route_length(route: Array) -> float:
+## Cost of a route for a train: total length plus BLOCKED_PENALTY for each
+## segment unavailable to it (mirrors find_route's relaxation).
+func _route_cost(route: Array, for_train: Train) -> float:
 	var total := 0.0
 	for seg in route:
 		total += seg.length()
+		if for_train != null and for_train.is_blocked(seg):
+			total += BLOCKED_PENALTY
 	return total
 
 ## Find the shortest route between two nodes using Dijkstra (weighted by
 ## segment length). Directions barred by a one-way signal are never taken.
-func find_route(from: NetworkNode, to: NetworkNode) -> Array:
+## With for_train given, segments unavailable to that train (held by another
+## train, directly or via the reverse twin) cost BLOCKED_PENALTY extra —
+## traffic is a preference to route around, never a reason to fail.
+func find_route(from: NetworkNode, to: NetworkNode, for_train: Train = null) -> Array:
 	if from == to:
 		return []
 
@@ -165,6 +179,8 @@ func find_route(from: NetworkNode, to: NetworkNode) -> Array:
 			var new_path: Array = path.duplicate()
 			new_path.append(seg)
 			var new_cost: float = cost + seg.length()
+			if for_train != null and for_train.is_blocked(seg):
+				new_cost += BLOCKED_PENALTY
 			queue.append([new_cost, next_node, new_path])
 
 	return []

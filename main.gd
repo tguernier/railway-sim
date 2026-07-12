@@ -77,6 +77,11 @@ const JUNCTION_RADIUS := 8.0
 const STATUS_DURATION := 3.0
 ## Seconds between deadlock checks (walking the wait-for graph is not free).
 const DEADLOCK_CHECK_INTERVAL := 1.0
+## Seconds a blocked train waits between reroute attempts. Reservation retries
+## stay per-frame; only the Dijkstra re-path is throttled. Well under
+## ALL_BLOCKED_TIMEOUT so trains get several chances to self-resolve before a
+## deadlock is flagged.
+const REROUTE_RETRY_INTERVAL := 1.0
 ## Every train blocked for this long is treated as a deadlock even when the
 ## wait-for graph shows no cycle (net for cases the graph misses).
 const ALL_BLOCKED_TIMEOUT := 10.0
@@ -553,7 +558,7 @@ func _dispatch_to_next_order(tr: Train, from_node: NetworkNode) -> void:
 	if target == null or target.station == null or target.station.platforms.size() == 0:
 		_stop_simulation("A stop lost its station — simulation stopped")
 		return
-	var route := network.find_route_to_platform(from_node, target.station.platforms[0])
+	var route := network.find_route_to_platform(from_node, target.station.platforms[0], tr)
 	if route.size() > 0:
 		tr.set_route(route)
 		# The route ends with the platform traversal — halt the head so the
@@ -561,6 +566,33 @@ func _dispatch_to_next_order(tr: Train, from_node: NetworkNode) -> void:
 		tr.stop_progress = _stop_point(tr, route[-1])
 	else:
 		_stop_simulation("No track route to the next stop — simulation stopped")
+
+## A train halted waiting for track re-paths from its waiting node — a signal
+## junction or platform end, by the reservation invariant — with other trains'
+## reservations penalized, and splices a tail that differs from the current
+## plan onto the kept prefix. History, indices, and held reservations stay
+## intact: the discarded tail lies beyond limit_index, so it holds nothing.
+## Skipped while the train still sits anchored at its departure platform: the
+## anchoring there (turnaround vs roll-through, the prepended platform
+## segment) was derived from the route's first segment and would not survive
+## a tail swap — the platform is a safe waiting point, so waiting is harmless.
+func _try_reroute_blocked(tr: Train) -> void:
+	if tr.route_index + 1 >= tr.route.size():
+		return
+	if tr.route_index == 0 and tr.current_segment().is_platform_segment():
+		return
+	var target := tr.current_order_town()
+	if target == null or target.station == null or target.station.platforms.size() == 0:
+		return
+	var node: NetworkNode = tr.route[tr.route_index].node_end
+	var new_tail := network.find_route_to_platform(node, target.station.platforms[0], tr)
+	if new_tail.is_empty() or new_tail == tr.route.slice(tr.route_index + 1):
+		return  # no route, or same plan as before — waiting here is cheapest
+	tr.route = tr.route.slice(0, tr.route_index + 1) + new_tail
+	# The new tail may enter the destination platform from the other end, so
+	# the halt fraction on the old final segment is meaningless.
+	tr.stop_progress = _stop_point(tr, tr.route[-1])
+	tr.try_extend_reservation()
 
 ## Head halt point (progress) on a platform segment that centers the consist
 ## on the platform. Consists always fit: car count is capped to the platform
@@ -607,9 +639,20 @@ func _process(delta: float) -> void:
 
 	queue_redraw()
 
-## Advance one train by one tick: move it, then handle its stop lifecycle.
+## Advance one train by one tick: move it, let a blocked train look for a way
+## around other trains' paths, then handle its stop lifecycle. The reroute
+## runs before the deadlock check each tick, so trains get a chance to
+## self-resolve; a genuine deadlock (no free alternative) still flags because
+## a fruitless reroute leaves the wait-for edge (blocked_by) in place.
 func _update_train(tr: Train, delta: float) -> void:
 	tr.move(delta)
+	if tr.waiting_for_track:
+		tr.blocked_time += delta
+		if tr.blocked_time >= REROUTE_RETRY_INTERVAL:
+			tr.blocked_time = 0.0
+			_try_reroute_blocked(tr)
+	else:
+		tr.blocked_time = 0.0
 	if tr.dwell_remaining > 0.0:
 		return
 	if tr.at_pending_stop():

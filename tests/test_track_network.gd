@@ -45,6 +45,12 @@ func run_all() -> void:
 	_t("one_way_signal_bars_reverse_direction", _test_one_way_signal_bars)
 	_t("one_way_signal_forces_other_branch", _test_one_way_forces_branch)
 	_t("unroutable_when_only_path_is_one_way_against", _test_one_way_unroutable_stop)
+	_t("penalty_prefers_free_branch", _test_penalty_prefers_free_branch)
+	_t("penalty_all_blocked_returns_shortest", _test_penalty_all_blocked)
+	_t("reverse_twin_reservation_penalizes", _test_reverse_twin_penalized)
+	_t("one_way_still_bars_with_for_train", _test_one_way_bars_with_train)
+	_t("platform_entry_end_avoids_traffic", _test_platform_entry_end)
+	_t("unroutable_stop_ignores_reservations", _test_unroutable_ignores_reservations)
 
 func _test_add_stored() -> void:
 	var net := TrackNetwork.new()
@@ -326,6 +332,107 @@ func _test_one_way_unroutable_stop() -> void:
 	eq(net.first_unroutable_stop([p1, p2]), -1)
 	link.exit_signal = true  # one-way at c serving b→c only
 	eq(net.first_unroutable_stop([p1, p2]), 0)
+
+## A short and a long branch between the same two nodes, the short one held
+## by another train. Returns [net, a, b, short_seg, long_seg, holder].
+func _blocked_branch_pair() -> Array:
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var b := _node(200, 0)
+	var short_seg := _twin(net, a, b)
+	var wps: Array[Vector2] = [Vector2(100, 300)]
+	var long_seg := TrackSegment.new(a, b, wps)
+	net.add_segment(long_seg)
+	var holder := Train.new()
+	holder.try_reserve([short_seg])
+	return [net, a, b, short_seg, long_seg, holder]
+
+func _test_penalty_prefers_free_branch() -> void:
+	var w := _blocked_branch_pair()
+	var net: TrackNetwork = w[0]
+	var tr := Train.new()
+	# The routing train pays the penalty on the held branch and detours...
+	var route := net.find_route(w[1], w[2], tr)
+	eq(route.size(), 1)
+	eq(route[0], w[4])
+	# ...while trainless routing and the holder itself still get the short one.
+	eq(net.find_route(w[1], w[2])[0], w[3])
+	eq(net.find_route(w[1], w[2], w[5])[0], w[3])
+
+func _test_penalty_all_blocked() -> void:
+	# With every branch held, the penalties cancel out and the shortest route
+	# is still returned — traffic is never a reason for routing to fail.
+	var w := _blocked_branch_pair()
+	var net: TrackNetwork = w[0]
+	var holder: Train = w[5]
+	holder.try_reserve([w[4]])
+	var route := net.find_route(w[1], w[2], Train.new())
+	eq(route.size(), 1)
+	eq(route[0], w[3])
+
+func _test_reverse_twin_penalized() -> void:
+	# Head-on case: the twin of the short branch being held blocks it just as
+	# hard as the branch itself.
+	var w := _blocked_branch_pair()
+	var net: TrackNetwork = w[0]
+	var holder: Train = w[5]
+	var short_seg: TrackSegment = w[3]
+	holder.release_all()
+	holder.try_reserve([short_seg.reverse])
+	eq(net.find_route(w[1], w[2], Train.new())[0], w[4])
+
+func _test_one_way_bars_with_train() -> void:
+	# one_way_against stays a hard exclusion, not a penalty: the barred
+	# direction is unroutable no matter who asks.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(100, 0)
+	var b := _node(200, 0)
+	var aj := _twin(net, a, j)
+	_twin(net, j, b)
+	aj.exit_signal = true
+	eq(net.find_route(b, a, Train.new()).size(), 0)
+
+func _test_platform_entry_end() -> void:
+	# s → x → entry ═platform═ exit ← y ← s: with the short approach to the
+	# entry end held by another train, the routing train pays the long way
+	# around and enters the platform from the exit end instead.
+	var net := TrackNetwork.new()
+	var s := _node(0, 0)
+	var x := _node(100, 0)
+	var entry := _node(200, 0)
+	var exit := _node(320, 0)
+	var y := _node(420, 0)
+	var platform := _platform(net, entry, exit)
+	var sx := _twin(net, s, x)
+	_twin(net, x, entry)
+	var wps: Array[Vector2] = [Vector2(210, 300)]
+	var sy := TrackSegment.new(s, y, wps)
+	net.add_segment(sy)
+	net.add_segment(_seg(y, exit))
+	var tr := Train.new()
+	eq(net.find_route_to_platform(s, platform, tr)[-1], platform.segment)
+	var holder := Train.new()
+	holder.try_reserve([sx])
+	var route := net.find_route_to_platform(s, platform, tr)
+	eq(route[-1], platform.reverse_segment)
+	is_true(route.has(sy))
+
+func _test_unroutable_ignores_reservations() -> void:
+	# Loop validation stays on the plain graph: a layout must not be rejected
+	# because of where trains happen to stand.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var b := _node(120, 0)
+	var c := _node(240, 0)
+	var d := _node(360, 0)
+	var p1 := _platform(net, a, b)
+	var p2 := _platform(net, c, d)
+	var bc := _twin(net, b, c)
+	var da := _twin(net, d, a)
+	var holder := Train.new()
+	holder.try_reserve([bc, da, p1.segment, p2.segment])
+	eq(net.first_unroutable_stop([p1, p2]), -1)
 
 func _test_unroutable_stop_wrap() -> void:
 	# One-way link p1 -> p2 but no way back: the loop fails on the wrap-around

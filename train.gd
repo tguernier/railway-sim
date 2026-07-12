@@ -46,6 +46,9 @@ var limit_index := -1
 ## True while the train is halted because the path ahead could not be
 ## reserved (retried every move).
 var waiting_for_track := false
+## Seconds continuously spent waiting for track since the last reroute
+## attempt — main.gd's accumulator for throttling blocked-train reroutes.
+var blocked_time := 0.0
 
 ## The train whose reservation blocked this train's last failed reserve
 ## attempt — the edge of the wait-for graph used for deadlock detection.
@@ -79,6 +82,7 @@ func set_route(new_route: Array) -> void:
 	stop_progress = -1.0
 	limit_index = -1
 	waiting_for_track = false
+	blocked_time = 0.0
 
 ## Check if the train has a route.
 func has_route() -> bool:
