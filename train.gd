@@ -10,6 +10,15 @@ const CAR_LENGTH := 26.0
 const CAR_GAP := 4.0
 ## Passenger capacity of one car.
 const CAR_CAPACITY := 20
+## Seconds a blocked train waits between re-path attempts. Reservation retries
+## stay per-frame; only the Dijkstra re-path is throttled. Well under main.gd's
+## ALL_BLOCKED_TIMEOUT so trains get several chances to self-resolve before a
+## deadlock is flagged.
+const REROUTE_RETRY_INTERVAL := 1.0
+## Cost improvement a free alternative tail must offer before the train
+## switches to it — hysteresis so near-equal branches don't flip-flop between
+## extensions. A blocked tail is abandoned for any strictly cheaper one.
+const SWITCH_MARGIN := CAR_LENGTH * 10.0
 
 ## Ordered list of track segments forming the current route. Array[TrackSegment]
 var route: Array = []
@@ -46,9 +55,20 @@ var limit_index := -1
 ## True while the train is halted because the path ahead could not be
 ## reserved (retried every move).
 var waiting_for_track := false
-## Seconds continuously spent waiting for track since the last reroute
-## attempt — main.gd's accumulator for throttling blocked-train reroutes.
+## Seconds continuously spent waiting for track since the last re-path
+## attempt — throttles the blocked-retry Dijkstra in _repath_provisional_tail.
 var blocked_time := 0.0
+## Whether the previous move() ended waiting for track — distinguishes a fresh
+## extension at a new boundary (re-path immediately) from a blocked retry
+## (re-path only every REROUTE_RETRY_INTERVAL).
+var _was_waiting := false
+
+## The network the train routes on and the platform its current leg targets,
+## set at dispatch — what try_extend_reservation re-paths against. Strong refs
+## are safe: neither holds trains strongly (reserved_by is a weakref), so no
+## RefCounted cycle.
+var network: TrackNetwork = null
+var target_platform: Platform = null
 
 ## The train whose reservation blocked this train's last failed reserve
 ## attempt — the edge of the wait-for graph used for deadlock detection.
@@ -83,6 +103,7 @@ func set_route(new_route: Array) -> void:
 	limit_index = -1
 	waiting_for_track = false
 	blocked_time = 0.0
+	_was_waiting = false
 
 ## Check if the train has a route.
 func has_route() -> bool:
@@ -104,6 +125,8 @@ func move(delta: float) -> void:
 		return
 	if not has_route():
 		return
+	_was_waiting = waiting_for_track
+	blocked_time = blocked_time + delta if _was_waiting else 0.0
 	waiting_for_track = false
 	var distance := speed * delta
 	while distance > 0.0 and not has_completed_route():
@@ -277,11 +300,16 @@ func board_from(town: Town) -> void:
 ## Extend the reservation from just past limit_index through the next safe
 ## waiting point on the route: the first segment whose exit carries a signal
 ## for this direction of travel, or the end of the route (the platform stop).
+## Before reserving, the provisional tail beyond limit_index is re-pathed with
+## other trains' reservations penalized and a sufficiently better tail is
+## spliced in — the per-signal lookahead that lets a train divert onto a free
+## branch at speed instead of halting at a red signal first.
 ## The whole slice is reserved atomically; on failure limit_index and the
 ## held reservations are unchanged. Returns true if the path ahead is covered.
 func try_extend_reservation() -> bool:
 	if limit_index >= route.size() - 1:
 		return true
+	_repath_provisional_tail()
 	var slice: Array = []
 	var end := limit_index
 	for i in range(limit_index + 1, route.size()):
@@ -293,6 +321,54 @@ func try_extend_reservation() -> bool:
 		return false
 	limit_index = end
 	return true
+
+## Re-path the provisional tail (route[limit_index + 1:]) to target_platform
+## with other trains' reservations penalized, and splice a better tail onto
+## the kept prefix — history, indices, and held reservations stay intact (the
+## discarded tail lies beyond limit_index, so it held nothing). Hysteresis:
+## a free tail is only abandoned for one cheaper by SWITCH_MARGIN, so
+## near-equal branches don't flip-flop; a blocked tail for any cheaper one.
+## Skipped while the train is still anchored at its departure platform
+## (limit_index == -1): the turnaround/roll-through anchoring came from the
+## route's first segment and would not survive a tail swap, and dispatch was
+## already traffic-aware. Blocked retries arrive every frame, so the Dijkstra
+## is throttled to one attempt per REROUTE_RETRY_INTERVAL while waiting.
+func _repath_provisional_tail() -> void:
+	if network == null or target_platform == null:
+		return
+	if limit_index < route_index:
+		return  # anchored at the departure platform (or an inconsistent state)
+	if _was_waiting and blocked_time < REROUTE_RETRY_INTERVAL:
+		return  # blocked retry — re-path at most once per interval
+	blocked_time = 0.0
+	var node: NetworkNode = route[limit_index].node_end
+	var old_tail: Array = route.slice(limit_index + 1)
+	var new_tail: Array = network.find_route_to_platform(node, target_platform, self)
+	if new_tail.is_empty():
+		return
+	var old_cost := network.route_cost(old_tail, self)
+	var new_cost := network.route_cost(new_tail, self)
+	var old_blocked := false
+	for seg in old_tail:
+		if is_blocked(seg):
+			old_blocked = true
+			break
+	var margin := 0.0 if old_blocked else SWITCH_MARGIN
+	if new_cost >= old_cost - margin:
+		return  # keep the current plan — waiting/staying is cheapest
+	route = route.slice(0, limit_index + 1) + new_tail
+	# The new tail may enter the destination platform from the other end, so
+	# the halt fraction on the old final segment is meaningless.
+	stop_progress = stop_point_on(route[-1])
+
+## Head halt point (progress) on a platform segment that centers the consist
+## on the platform. Consists always fit: car count is capped to the platform
+## length, so the whole train sits on the platform segment while dwelling.
+func stop_point_on(platform_seg: TrackSegment) -> float:
+	var total := platform_seg.length()
+	if total <= 0.0:
+		return 1.0
+	return clampf(0.5 + consist_length() / (2.0 * total), 0.0, 1.0)
 
 ## Reserve every segment for this train, all-or-nothing: if any segment (or
 ## its reverse twin) is held by another train, nothing is reserved and

@@ -13,10 +13,13 @@ func run_all() -> void:
 	_t("one_way_passing_loop_lets_head_on_trains_pass", _test_passing_loop)
 	_t("dispatch_routes_around_parked_train", _test_dispatch_around_parked)
 	_t("dispatch_with_no_free_alternative_still_routes", _test_dispatch_all_blocked)
-	_t("two_way_passing_loop_lets_head_on_trains_pass", _test_two_way_loop)
-	_t("reroute_splices_tail_and_switches_platform_end", _test_reroute_splice)
-	_t("reroute_unchanged_choice_is_noop", _test_reroute_noop)
-	_t("reroute_skipped_at_anchored_platform", _test_reroute_anchored_skip)
+	_t("two_way_passing_loop_diverts_at_speed", _test_two_way_loop)
+	_t("convoy_spreads_across_branches", _test_convoy_spread)
+	_t("lookahead_splices_tail_and_switches_platform_end", _test_reroute_splice)
+	_t("lookahead_unchanged_choice_is_noop", _test_reroute_noop)
+	_t("lookahead_skipped_at_anchored_platform", _test_reroute_anchored_skip)
+	_t("lookahead_keeps_near_equal_free_tail", _test_hysteresis_keeps_tail)
+	_t("lookahead_adopts_much_shorter_free_tail", _test_adopts_shorter_tail)
 	_t("nose_to_nose_deadlock_detected", _test_deadlock_detected)
 	_t("queue_behind_moving_leader_not_deadlocked", _test_chase_no_deadlock)
 	_t("all_blocked_timeout_flags_deadlock", _test_all_blocked_timeout)
@@ -414,12 +417,13 @@ func _test_dispatch_all_blocked() -> void:
 	is_true(m.trains[1].has_route())
 	m.free()
 
-## The Phase A payoff: the passing loop of _test_passing_loop with plain
+## The Phase B headline: the passing loop of _test_passing_loop with plain
 ## two-way signals only — on both approaches (sa, sb) and at both loop
 ## mouths. The loop is deliberately asymmetric (branch2 bulges further out)
-## so routing provably sends both trains down branch1; the loser halts at
-## its approach signal, the splice-on-block reroute diverts it onto the free
-## branch2, and the trains pass inside the loop.
+## so routing provably sends both trains down branch1; the per-signal
+## lookahead re-paths at each extension, so the loser diverts onto the free
+## branch2 *at speed* — the trains pass inside the loop without either one
+## ever halting on the way in.
 ##
 ##   A ──s│s──╮ ╭────s branch1 s────╮ ╭──s│s── B
 ##       sa    LW                    LE    sb
@@ -459,8 +463,8 @@ func _test_two_way_loop() -> void:
 	is_true(m.trains[1].route.has(branch1.reverse))
 	var loop_segs := [branch1, branch1.reverse, branch2, branch2.reverse]
 	var disjoint := true
-	var saw_wait := false
 	var saw_pass := false
+	var waited_before_pass := false
 	var flagged := false
 	var wrapped := [false, false]
 	for tick in range(3600):  # 60 s
@@ -474,27 +478,106 @@ func _test_two_way_loop() -> void:
 				and loop_segs.has(m.trains[1].current_segment()):
 			saw_pass = true
 		for i in range(m.trains.size()):
-			if m.trains[i].waiting_for_track:
-				saw_wait = true
+			if not saw_pass and m.trains[i].waiting_for_track:
+				waited_before_pass = true
 			if m.trains[i].current_order_index == 0:
 				wrapped[i] = true
 	eq(m.state, m.GameState.SIMULATING)
 	is_true(disjoint)
-	is_true(saw_wait)  # both routed onto one branch — the loser really waited
-	is_true(saw_pass)  # the reroute split them across the branches
-	is_false(flagged)  # waiting out a reroute is not a deadlock
+	is_true(saw_pass)  # the lookahead split them across the branches
+	is_false(waited_before_pass)  # the loser diverted at speed, no halt
+	is_false(flagged)
 	is_true(wrapped[0])
 	is_true(wrapped[1])
 	m.free()
 
-## Loop layout for the reroute unit tests: from s, a short path (via x) to the
-## platform's entry end and a long free path (via y) to its exit end.
+## Load balancing: two same-direction trains and a two-branch loop on the way
+## east, with a forked pair of destination stations beyond it so the trains
+## never contend for a platform:
+##
+##                        ╭── branch1 ──╮        ╭── E1
+##   W2 ══ W1 ── m1 ─ sa ─ LW            LE ─ sb ─┤
+##                        ╰── branch2 ──╯        ╰── E2
+##
+## Both dispatches pick the shorter branch1; the leader reserves it ahead,
+## and the follower's extension diverts onto branch2 while the leader merely
+## holds branch1 — the convoy spreads across the branches instead of
+## queueing stop-and-go. Run only through the eastbound legs: the return
+## trip deliberately deadlocks on the single west line (no passing loop
+## there), which is the player's layout problem, not this test's.
+func _test_convoy_spread() -> void:
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	var m1 := NetworkNode.junction(Vector2(150, 300))
+	var sa := NetworkNode.junction(Vector2(300, 300))
+	var lw := NetworkNode.junction(Vector2(420, 300))
+	var le := NetworkNode.junction(Vector2(1220, 300))
+	var sb := NetworkNode.junction(Vector2(1340, 300))
+	var f1 := NetworkNode.junction(Vector2(1550, 180))
+	var f2 := NetworkNode.junction(Vector2(1550, 420))
+	ed.create_bidirectional_track(NetworkNode.junction(Vector2(-800, 300)), m1, [])
+	ed.create_bidirectional_track(m1, sa, [])
+	ed.create_bidirectional_track(sa, lw, [])
+	var branch1 := ed.create_bidirectional_track(lw, le, [Vector2(820, 240)] as Array[Vector2])
+	var branch2 := ed.create_bidirectional_track(lw, le, [Vector2(820, 450)] as Array[Vector2])
+	ed.create_bidirectional_track(le, sb, [])
+	ed.create_bidirectional_track(sb, f1, [])
+	ed.create_bidirectional_track(f1, NetworkNode.junction(Vector2(1900, 180)), [])
+	ed.create_bidirectional_track(sb, f2, [])
+	ed.create_bidirectional_track(f2, NetworkNode.junction(Vector2(1900, 420)), [])
+	var w2 := Town.new(Vector2(-500, 350), Color.WHITE)
+	var w1 := Town.new(Vector2(-100, 350), Color.WHITE)
+	var e1 := Town.new(Vector2(1750, 230), Color.WHITE)
+	var e2 := Town.new(Vector2(1750, 470), Color.WHITE)
+	m.towns.assign([w2, w1, e1, e2])
+	is_true(ed.place_station(Vector2(-500, 300), m.towns) != null)
+	is_true(ed.place_station(Vector2(-100, 300), m.towns) != null)
+	is_true(ed.place_station(Vector2(1750, 180), m.towns) != null)
+	is_true(ed.place_station(Vector2(1750, 420), m.towns) != null)
+	is_true(branch1.length() < branch2.length())
+	for seg in [branch1, branch1.reverse, branch2, branch2.reverse]:
+		seg.exit_signal = true
+	for node in [m1, sa, sb]:
+		for seg in m.network.get_incoming(node):
+			seg.exit_signal = true
+	m.roster[0].orders.assign([w1, e1])
+	m._buy_train()
+	m.roster[1].orders.assign([w2, e2])
+	m._start_simulation()
+	eq(m.state, m.GameState.SIMULATING)
+	# Both dispatches pick the short branch — the conflict is real.
+	is_true(m.trains[0].route.has(branch1))
+	is_true(m.trains[1].route.has(branch1))
+	var disjoint := true
+	var saw_spread := false
+	var flagged := false
+	for tick in range(900):  # 15 s — through the eastbound legs
+		m._process(1.0 / 60.0)
+		if not _reservations_disjoint(m.trains):
+			disjoint = false
+		if not m.deadlocked_trains.is_empty():
+			flagged = true
+		# The spread: leader on branch1 while the follower rolls branch2.
+		if m.trains[0].current_segment() == branch1 \
+				and m.trains[1].current_segment() == branch2:
+			saw_spread = true
+	eq(m.state, m.GameState.SIMULATING)
+	is_true(disjoint)
+	is_true(saw_spread)  # the follower diverted while branch1 was merely reserved
+	is_false(flagged)
+	is_true(m.trains[1].route.has(branch2))
+	m.free()
+
+## Loop layout for the lookahead unit tests: from s, a short path (via x) to
+## the platform's entry end and a long free path (via y) to its exit end.
 ##
 ##   q ── s ── x ── entry ═platform═ exit ── y
 ##         ╰────────────(long arc)───────────╯
 ##
-## Returns [m, town, qs, sx, sy, tr] with tr a hand-built train waiting at s:
-## head at the end of q→s, planned tail running via x.
+## Returns [m, town, qs, sx, sy, tr] with tr a hand-built train standing at s
+## as dispatch would leave it: head at the end of q→s with the reservation
+## covering it (limit_index 0), planned tail running via x, and the re-path
+## refs (network, target_platform) set.
 func _reroute_world() -> Array:
 	var m := _main()
 	var ed: TrackEditor = m.editor
@@ -517,10 +600,14 @@ func _reroute_world() -> Array:
 	var tr := Train.new()
 	tr.orders.assign([town])
 	tr.current_order_index = 0
+	tr.network = m.network
+	tr.target_platform = plat
 	tr.route = [qs] + m.network.find_route_to_platform(s, plat)
 	tr.route_index = 0
 	tr.segment_progress = 1.0
-	tr.stop_progress = m._stop_point(tr, tr.route[-1])
+	tr.stop_progress = tr.stop_point_on(tr.route[-1])
+	is_true(tr.try_reserve([qs]))
+	tr.limit_index = 0
 	return [m, town, qs, sx, sy, tr]
 
 func _test_reroute_splice() -> void:
@@ -534,13 +621,17 @@ func _test_reroute_splice() -> void:
 	eq(tr.route[-1], plat.segment)
 	var blocker := Train.new()
 	is_true(blocker.try_reserve([w[3]]))
-	m._try_reroute_blocked(tr)
+	# Extending across s re-paths the provisional tail before reserving: the
+	# blocked short way loses to the free long way, so the train diverts
+	# without ever failing a reservation.
+	is_true(tr.try_extend_reservation())
+	is_false(tr.waiting_for_track)
 	# The traversed prefix is kept, the tail now runs the long way via y and
 	# enters the platform from the other end, with the halt point recomputed.
 	eq(tr.route[0], w[2])
 	is_true(tr.route.has(w[4].reverse))
 	eq(tr.route[-1], plat.reverse_segment)
-	approx(tr.stop_progress, m._stop_point(tr, plat.reverse_segment), 0.001)
+	approx(tr.stop_progress, tr.stop_point_on(plat.reverse_segment), 0.001)
 	# The new tail was reserved (no signals — it runs to the route end), and
 	# nothing leaked: every held segment is on the spliced route.
 	eq(tr.limit_index, tr.route.size() - 1)
@@ -550,34 +641,98 @@ func _test_reroute_splice() -> void:
 
 func _test_reroute_noop() -> void:
 	# With nothing blocked the cheapest tail equals the planned one — the
-	# reroute must not churn the route or touch reservations.
+	# lookahead must not churn the route or touch reservations.
 	var w := _reroute_world()
 	var m: Node2D = w[0]
 	var tr: Train = w[5]
 	var before: Array = tr.route.duplicate()
-	m._try_reroute_blocked(tr)
+	tr._repath_provisional_tail()
 	eq(tr.route, before)
-	eq(tr.limit_index, -1)
-	eq(tr.reserved.size(), 0)
+	eq(tr.limit_index, 0)
+	eq(tr.reserved.size(), 1)
 	m.free()
 
 func _test_reroute_anchored_skip() -> void:
-	# A train still anchored at its departure platform (route_index 0 on a
-	# platform segment) keeps waiting even when a better tail exists: its
+	# A train still anchored at its departure platform (limit_index -1, before
+	# the first extension) keeps waiting even when a better tail exists: its
 	# turnaround/roll-through anchoring cannot survive a tail swap.
 	var w := _reroute_world()
 	var m: Node2D = w[0]
 	var town: Town = w[1]
 	var tr: Train = w[5]
 	var plat: Platform = town.station.platforms[0]
+	tr.release_all()
 	tr.route = [plat.segment] + m.network.find_route(plat.segment.node_end, w[2].node_start)
 	tr.route_index = 0
 	tr.segment_progress = 1.0
+	tr.limit_index = -1
 	tr.orders.assign([town])
 	var blocker := Train.new()
 	is_true(blocker.try_reserve([tr.route[1]]))
 	var before: Array = tr.route.duplicate()
-	m._try_reroute_blocked(tr)
+	# The extension fails atomically and the lookahead stays out of it: the
+	# route is untouched and nothing was reserved.
+	is_false(tr.try_extend_reservation())
 	eq(tr.route, before)
 	eq(tr.reserved.size(), 0)
+	eq(tr.limit_index, -1)
+	m.free()
+
+func _test_hysteresis_keeps_tail() -> void:
+	# Two near-equal branches s→x, nothing reserved: the committed (slightly
+	# longer) branch is kept — a free tail is only abandoned for one cheaper
+	# by SWITCH_MARGIN, so equal-ish branches never flip-flop.
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	var q := NetworkNode.junction(Vector2(-100, 0))
+	var s := NetworkNode.junction(Vector2(0, 0))
+	var x := NetworkNode.junction(Vector2(300, 0))
+	var entry := NetworkNode.junction(Vector2(400, 0))
+	var exit := NetworkNode.junction(Vector2(600, 0))
+	var qs := ed.create_bidirectional_track(q, s, [])
+	var direct := ed.create_bidirectional_track(s, x, [])
+	var curved := ed.create_bidirectional_track(s, x, [Vector2(150, 70)] as Array[Vector2])
+	var xe := ed.create_bidirectional_track(x, entry, [])
+	ed.create_bidirectional_track(entry, exit, [])
+	var town := Town.new(Vector2(500, 50), Color.WHITE)
+	m.towns.assign([town])
+	is_true(ed.place_station(Vector2(500, 0), m.towns) != null)
+	var plat: Platform = town.station.platforms[0]
+	is_true(curved.length() > direct.length())
+	is_true(curved.length() - direct.length() < Train.SWITCH_MARGIN)
+	var tr := Train.new()
+	tr.network = m.network
+	tr.target_platform = plat
+	tr.route = [qs, curved, xe, plat.segment]
+	tr.route_index = 0
+	tr.segment_progress = 1.0
+	tr.stop_progress = tr.stop_point_on(plat.segment)
+	is_true(tr.try_reserve([qs]))
+	tr.limit_index = 0
+	var before: Array = tr.route.duplicate()
+	tr._repath_provisional_tail()
+	eq(tr.route, before)
+	m.free()
+
+func _test_adopts_shorter_tail() -> void:
+	# The flip side of hysteresis: a free tail is abandoned when the
+	# alternative beats it by more than SWITCH_MARGIN — a train that earlier
+	# diverted the long way round returns to the short path once it frees up.
+	var w := _reroute_world()
+	var m: Node2D = w[0]
+	var town: Town = w[1]
+	var tr: Train = w[5]
+	var plat: Platform = town.station.platforms[0]
+	# Point the provisional tail the long way (via y) with no traffic at all.
+	var blocker := Train.new()
+	is_true(blocker.try_reserve([w[3]]))
+	var long_tail: Array = m.network.find_route_to_platform(w[2].node_end, plat, tr)
+	blocker.release_all()
+	is_true(long_tail.has(w[4].reverse))
+	tr.route = [w[2]] + long_tail
+	tr.stop_progress = tr.stop_point_on(tr.route[-1])
+	tr._repath_provisional_tail()
+	is_true(tr.route.has(w[3]))
+	eq(tr.route[-1], plat.segment)
+	approx(tr.stop_progress, tr.stop_point_on(plat.segment), 0.001)
 	m.free()

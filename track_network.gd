@@ -95,8 +95,8 @@ func find_route_to_platform(from: NetworkNode, platform: Platform, for_train: Tr
 		return [platform.reverse_segment]
 	var route_a := find_route(from, entry, for_train)
 	var route_b := find_route(from, exit, for_train)
-	var len_a := _route_cost(route_a, for_train) if route_a.size() > 0 else INF
-	var len_b := _route_cost(route_b, for_train) if route_b.size() > 0 else INF
+	var len_a := route_cost(route_a, for_train) if route_a.size() > 0 else INF
+	var len_b := route_cost(route_b, for_train) if route_b.size() > 0 else INF
 	if is_inf(len_a) and is_inf(len_b):
 		return []
 	if len_a <= len_b:
@@ -127,8 +127,10 @@ func first_unroutable_stop(platforms: Array) -> int:
 	return -1
 
 ## Cost of a route for a train: total length plus BLOCKED_PENALTY for each
-## segment unavailable to it (mirrors find_route's relaxation).
-func _route_cost(route: Array, for_train: Train) -> float:
+## segment unavailable to it (mirrors find_route's relaxation). Also what a
+## train's per-extension lookahead uses to compare its provisional tail
+## against the re-pathed alternative.
+func route_cost(route: Array, for_train: Train) -> float:
 	var total := 0.0
 	for seg in route:
 		total += seg.length()
