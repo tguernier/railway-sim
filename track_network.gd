@@ -8,6 +8,13 @@ extends RefCounted
 ## beneath the penalty.
 const BLOCKED_PENALTY := 10000.0
 
+## Maximum heading change through a junction (end of the arriving segment vs
+## start of the departing one). Junctions are turnouts: genuine continuations
+## diverge by at most the turnout angle, while going back the way you came is
+## a ~180° flip, so a right angle separates the two cleanly. Anything past it
+## is a switchback — impossible for a train without stopping and reversing.
+const MAX_THROUGH_ANGLE := PI / 2.0
+
 ## All track segments in the network.
 var segments: Array[TrackSegment] = []
 ## All junction nodes in the network.
@@ -73,6 +80,28 @@ func one_way_against(seg: TrackSegment) -> bool:
 			return false  # a signal serves this direction too — two-way
 	return true
 
+## Whether a train arriving on prev can roll onto next without reversing:
+## the reverse twin never continues, and the departure heading must stay
+## within MAX_THROUGH_ANGLE of the arrival heading. A null prev means no
+## established heading, so anything goes.
+func can_continue(prev: TrackSegment, next: TrackSegment) -> bool:
+	if prev == null:
+		return true
+	if next == prev.reverse:
+		return false
+	return absf(angle_difference(prev.angle_at(1.0), next.angle_at(0.0))) <= MAX_THROUGH_ANGLE
+
+## Whether next is a legal move for a route currently arriving on prev.
+## first marks the route's first hop: with allow_reversal (a train standing
+## at a station stop may change direction) the first hop may also be prev's
+## own reverse twin — the train leaves the way it came in. Other backward
+## branches stay barred even then: a stopped train reverses along its own
+## track, it does not bend through a switchback.
+func _hop_allowed(prev: TrackSegment, next: TrackSegment, first: bool, allow_reversal: bool) -> bool:
+	if can_continue(prev, next):
+		return true
+	return first and allow_reversal and prev != null and next == prev.reverse
+
 ## Get all departure angles (radians) of outgoing segments at a node.
 func departure_angles_at(node: NetworkNode) -> Array[float]:
 	var angles: Array[float] = []
@@ -85,16 +114,20 @@ func departure_angles_at(node: NetworkNode) -> Array[float]:
 ## gives the shorter path), so the train passes alongside the platform and
 ## finishes at its far end. With for_train given, both candidate entry ends
 ## are costed with reservation penalties, so the entry-end choice is
-## traffic-aware too.
-func find_route_to_platform(from: NetworkNode, platform: Platform, for_train: Train = null) -> Array:
+## traffic-aware too. `arriving`/`allow_reversal` seed the departure heading
+## (see find_route): dispatch passes the platform segment the train stands on
+## with allow_reversal, so it either continues forward or turns around in
+## place — never bends backward through the junction at the platform's end.
+func find_route_to_platform(from: NetworkNode, platform: Platform, for_train: Train = null,
+		arriving: TrackSegment = null, allow_reversal := false) -> Array:
 	var entry := platform.segment.node_start
 	var exit := platform.segment.node_end
-	if from == entry:
+	if from == entry and _hop_allowed(arriving, platform.segment, true, allow_reversal):
 		return [platform.segment]
-	if from == exit:
+	if from == exit and _hop_allowed(arriving, platform.reverse_segment, true, allow_reversal):
 		return [platform.reverse_segment]
-	var route_a := find_route(from, entry, for_train)
-	var route_b := find_route(from, exit, for_train)
+	var route_a := find_route(from, entry, for_train, arriving, platform.segment, allow_reversal)
+	var route_b := find_route(from, exit, for_train, arriving, platform.reverse_segment, allow_reversal)
 	var len_a := route_cost(route_a, for_train) if route_a.size() > 0 else INF
 	var len_b := route_cost(route_b, for_train) if route_b.size() > 0 else INF
 	if is_inf(len_a) and is_inf(len_b):
@@ -117,13 +150,13 @@ func find_route_to_platform(from: NetworkNode, platform: Platform, for_train: Tr
 func first_unroutable_stop(platforms: Array) -> int:
 	if platforms.size() == 0:
 		return -1
-	var from_node: NetworkNode = platforms[0].segment.node_end
+	var arriving: TrackSegment = platforms[0].segment
 	for i in range(1, platforms.size() + 1):
 		var idx := i % platforms.size()
-		var route := find_route_to_platform(from_node, platforms[idx])
+		var route := find_route_to_platform(arriving.node_end, platforms[idx], null, arriving, true)
 		if route.size() == 0:
 			return idx
-		from_node = route[-1].node_end
+		arriving = route[-1]
 	return -1
 
 ## Cost of a route for a train: total length plus BLOCKED_PENALTY for each
@@ -143,11 +176,23 @@ func route_cost(route: Array, for_train: Train) -> float:
 ## With for_train given, segments unavailable to that train (held by another
 ## train, directly or via the reverse twin) cost BLOCKED_PENALTY extra —
 ## traffic is a preference to route around, never a reason to fail.
-func find_route(from: NetworkNode, to: NetworkNode, for_train: Train = null) -> Array:
-	if from == to:
+##
+## The search is direction-aware: its state is the directed segment a path
+## arrives on (not the node), and every junction transition must satisfy
+## can_continue — trains never switchback mid-route. `arriving` seeds the
+## heading at `from` (the segment the train stands on or the route so far
+## arrives by); with allow_reversal the first hop may be arriving's reverse
+## twin (a stopped train departing back the way it came). With exit_seg the
+## goal only counts when the path can continue onto it — used to guarantee
+## the platform traversal appended by find_route_to_platform is takeable.
+func find_route(from: NetworkNode, to: NetworkNode, for_train: Train = null,
+		arriving: TrackSegment = null, exit_seg: TrackSegment = null,
+		allow_reversal := false) -> Array:
+	if from == to and exit_seg == null:
 		return []
 
-	# Each entry: [cost, node, path]
+	# Each entry: [cost, node, path]; the arriving segment is path[-1], or
+	# `arriving` while the path is still empty.
 	var queue: Array = [[0.0, from, []]]
 	var visited: Dictionary = {}
 
@@ -163,26 +208,33 @@ func find_route(from: NetworkNode, to: NetworkNode, for_train: Train = null) -> 
 		var cost: float = current[0]
 		var node: NetworkNode = current[1]
 		var path: Array = current[2]
+		var prev: TrackSegment = path[-1] if path.size() > 0 else arriving
 
-		if visited.has(node):
-			continue
-		visited[node] = true
+		# Visited is keyed by the arriving segment: with the no-switchback
+		# rule, reachability onward depends on the heading a node is reached
+		# with, so each directed segment (not each node) is a search state.
+		# The start state (empty path) is unique and needs no mark.
+		if path.size() > 0:
+			if visited.has(prev):
+				continue
+			visited[prev] = true
 
-		# Check at dequeue time — this is the shortest path to this node
-		if node == to:
+		# Check at dequeue time — this is the shortest path to this state
+		if node == to and (exit_seg == null or can_continue(prev, exit_seg)):
 			return path
 
 		for seg in get_outgoing(node):
 			if one_way_against(seg):
 				continue  # a one-way signal bars entry in this direction
-			var next_node: NetworkNode = seg.node_end
-			if visited.has(next_node):
+			if not _hop_allowed(prev, seg, path.size() == 0, allow_reversal):
+				continue  # reversing through a junction is not a move
+			if visited.has(seg):
 				continue
 			var new_path: Array = path.duplicate()
 			new_path.append(seg)
 			var new_cost: float = cost + seg.length()
 			if for_train != null and for_train.is_blocked(seg):
 				new_cost += BLOCKED_PENALTY
-			queue.append([new_cost, next_node, new_path])
+			queue.append([new_cost, seg.node_end, new_path])
 
 	return []

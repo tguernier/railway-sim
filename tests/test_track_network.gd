@@ -8,9 +8,13 @@ func _seg(a: NetworkNode, b: NetworkNode) -> TrackSegment:
 	return TrackSegment.new(a, b)
 
 ## Build a platform pair between two nodes and register it on a network.
+## The two directions are linked as reverse twins, as place_station does —
+## station reversal (a stopped train departing the way it came) depends on it.
 func _platform(net: TrackNetwork, a: NetworkNode, b: NetworkNode) -> Platform:
 	var fwd := TrackSegment.new(a, b)
 	var rev := TrackSegment.new(b, a)
+	fwd.reverse = rev
+	rev.reverse = fwd
 	net.add_segment(fwd)
 	net.add_segment(rev)
 	var platform := Platform.new(fwd, rev, 1.0)
@@ -51,6 +55,9 @@ func run_all() -> void:
 	_t("one_way_still_bars_with_for_train", _test_one_way_bars_with_train)
 	_t("platform_entry_end_avoids_traffic", _test_platform_entry_end)
 	_t("unroutable_stop_ignores_reservations", _test_unroutable_ignores_reservations)
+	_t("switchback_through_junction_rejected", _test_switchback_rejected)
+	_t("reversal_only_first_hop_at_stop", _test_reversal_first_hop)
+	_t("v_junction_stops_unroutable", _test_v_junction_unroutable)
 
 func _test_add_stored() -> void:
 	var net := TrackNetwork.new()
@@ -406,7 +413,9 @@ func _test_platform_entry_end() -> void:
 	var platform := _platform(net, entry, exit)
 	var sx := _twin(net, s, x)
 	_twin(net, x, entry)
-	var wps: Array[Vector2] = [Vector2(210, 300)]
+	# The detour swings south then approaches y from the east, so continuing
+	# westward onto y → exit is a legal (non-switchback) junction move.
+	var wps: Array[Vector2] = [Vector2(210, 300), Vector2(520, 150)]
 	var sy := TrackSegment.new(s, y, wps)
 	net.add_segment(sy)
 	net.add_segment(_seg(y, exit))
@@ -433,6 +442,54 @@ func _test_unroutable_ignores_reservations() -> void:
 	var holder := Train.new()
 	holder.try_reserve([bc, da, p1.segment, p2.segment])
 	eq(net.first_unroutable_stop([p1, p2]), -1)
+
+func _test_switchback_rejected() -> void:
+	# a ── j ── c with a branch j → d diverging gently forward: continuing
+	# a→j→d or a→j→c is fine, but d→j→c would bend ~150° through the
+	# junction — a switchback no real train can make.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(300, 0)
+	var c := _node(600, 0)
+	var d := _node(600, 80)
+	_twin(net, a, j)
+	_twin(net, j, c)
+	_twin(net, j, d)
+	eq(net.find_route(a, c).size(), 2)
+	eq(net.find_route(a, d).size(), 2)
+	eq(net.find_route(d, c).size(), 0)
+	eq(net.find_route(c, d).size(), 0)
+
+func _test_reversal_first_hop() -> void:
+	# A train standing on b→a at node a: with allow_reversal it may depart
+	# back along its own twin a→b — but only while stationary (first hop).
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var b := _node(300, 0)
+	var c := _node(600, 0)
+	var ab := _twin(net, a, b)
+	_twin(net, b, c)
+	var standing := ab.reverse  # b→a
+	eq(net.find_route(a, c, null, standing).size(), 0)  # rolling: no reversal
+	var route := net.find_route(a, c, null, standing, null, true)
+	eq(route.size(), 2)  # reverses onto a→b, then continues b→c
+	eq(route[0], ab)
+
+func _test_v_junction_unroutable() -> void:
+	# Two station branches hang forward off the same junction: getting from
+	# one to the other needs a mid-route direction change at j, which trains
+	# cannot do — the order loop must be rejected.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(300, 0)
+	var b1 := _node(500, 50)
+	var b2 := _node(500, -50)
+	_twin(net, a, j)
+	_twin(net, j, b1)
+	_twin(net, j, b2)
+	var p1 := _platform(net, b1, _node(620, 80))
+	var p2 := _platform(net, b2, _node(620, -80))
+	eq(net.first_unroutable_stop([p1, p2]), 1)
 
 func _test_unroutable_stop_wrap() -> void:
 	# One-way link p1 -> p2 but no way back: the loop fails on the wrap-around

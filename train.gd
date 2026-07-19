@@ -343,7 +343,9 @@ func _repath_provisional_tail() -> void:
 	blocked_time = 0.0
 	var node: NetworkNode = route[limit_index].node_end
 	var old_tail: Array = route.slice(limit_index + 1)
-	var new_tail: Array = network.find_route_to_platform(node, target_platform, self)
+	# The tail must continue the rolling train's heading (no allow_reversal:
+	# only a train standing at a stop may change direction).
+	var new_tail: Array = network.find_route_to_platform(node, target_platform, self, route[limit_index])
 	if new_tail.is_empty():
 		return
 	var old_cost := network.route_cost(old_tail, self)

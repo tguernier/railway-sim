@@ -16,6 +16,9 @@ var editor: TrackEditor
 var trains: Array[Train] = []
 ## Player's current money, earned by delivering passengers.
 var money := 1000.0
+## Fleet cost charged when the current simulation run started; refunded when
+## the run stops (the charge is per run, not a permanent purchase).
+var fleet_cost_paid := 0.0
 ## Frame counter used to throttle passenger generation.
 var frame_count := 0
 
@@ -105,6 +108,7 @@ func _reset_game() -> void:
 	editor = TrackEditor.new(network)
 	trains = []
 	money = 1000.0
+	fleet_cost_paid = 0.0
 	frame_count = 0
 	hovered_town = null
 	hovered_junction = null
@@ -173,6 +177,13 @@ func _input(event: InputEvent) -> void:
 	# V toggles the reservation overlay (drawn while simulating).
 	if event is InputEventKey and event.pressed and event.keycode == KEY_V:
 		show_reservations = not show_reservations
+		return
+
+	# ESC while simulating stops the run and returns to editing — the layout,
+	# roster, and earnings survive (unlike R, which wipes everything).
+	if state == GameState.SIMULATING and event is InputEventKey and event.pressed \
+			and event.keycode == KEY_ESCAPE:
+		_stop_simulation("Simulation stopped — back to editing (fleet cost refunded)")
 		return
 
 	if state == GameState.EDITING:
@@ -510,6 +521,7 @@ func _start_simulation() -> void:
 			% [int(total_cost), int(TRAIN_COST), int(COST_PER_CAR)])
 		return
 	money -= total_cost
+	fleet_cost_paid = total_cost
 	state = GameState.SIMULATING
 	editing_orders = false
 	placing_station = false
@@ -527,7 +539,7 @@ func _start_simulation() -> void:
 		# The train starts parked at its first stop's platform, as if it had
 		# just finished a stop there — same anchoring as a departure.
 		var start_platform: Platform = plan.orders[0].station.platforms[0]
-		_dispatch_to_next_order(tr, start_platform.segment.node_end)
+		_dispatch_to_next_order(tr, start_platform.segment.node_end, start_platform.segment)
 		if state != GameState.SIMULATING:
 			return
 		if tr.has_route():
@@ -541,10 +553,13 @@ func _start_simulation() -> void:
 		tr.try_extend_reservation()
 
 ## Dispatch a train toward its next order stop's platform via Dijkstra.
-## Orders are validated before the simulation starts, but a leg can still
-## come up empty if the network or stations change mid-simulation — in that
-## case the simulation is halted rather than leaving the train stranded.
-func _dispatch_to_next_order(tr: Train, from_node: NetworkNode) -> void:
+## `arriving` is the segment the train stands on (its heading at from_node);
+## a stationary train may depart forward or reverse back along it, but never
+## bend backward through the junction ahead. Orders are validated before the
+## simulation starts, but a leg can still come up empty if the network or
+## stations change mid-simulation — in that case the simulation is halted
+## rather than leaving the train stranded.
+func _dispatch_to_next_order(tr: Train, from_node: NetworkNode, arriving: TrackSegment) -> void:
 	tr.advance_order()
 	var target := tr.current_order_town()
 	if target == null or target.station == null or target.station.platforms.size() == 0:
@@ -552,7 +567,7 @@ func _dispatch_to_next_order(tr: Train, from_node: NetworkNode) -> void:
 		return
 	tr.network = network
 	tr.target_platform = target.station.platforms[0]
-	var route := network.find_route_to_platform(from_node, tr.target_platform, tr)
+	var route := network.find_route_to_platform(from_node, tr.target_platform, tr, arriving, true)
 	if route.size() > 0:
 		tr.set_route(route)
 		# The route ends with the platform traversal — halt the head so the
@@ -565,7 +580,11 @@ func _dispatch_to_next_order(tr: Train, from_node: NetworkNode) -> void:
 func _max_car_count() -> int:
 	return int((TrackEditor.PLATFORM_LENGTH + Train.CAR_GAP) / (Train.CAR_LENGTH + Train.CAR_GAP))
 
-## Halt the simulation and return to editing mode.
+## Halt the simulation and return to editing mode. The world (tracks, towns,
+## roster, undo stack) is kept; only the running trains despawn. The fleet
+## cost charged at simulation start is refunded — it is charged per run, so
+## stopping to fix signals and restarting is money-neutral (fares earned
+## during the run are kept).
 func _stop_simulation(msg: String) -> void:
 	state = GameState.EDITING
 	for tr in trains:
@@ -573,6 +592,8 @@ func _stop_simulation(msg: String) -> void:
 	trains = []
 	deadlocked_trains = []
 	_all_blocked_time = 0.0
+	money += fleet_cost_paid
+	fleet_cost_paid = 0.0
 	_show_status(msg)
 
 ## Handle 1 simulation tick.
@@ -615,7 +636,7 @@ func _update_train(tr: Train, delta: float) -> void:
 		else:
 			_arrive_at_platform(tr)
 	elif tr.has_completed_route() and tr.boarded_this_leg:
-		_dispatch_to_next_order(tr, tr.route[-1].node_end)
+		_dispatch_to_next_order(tr, tr.route[-1].node_end, tr.route[-1])
 
 ## Deadlock detection. Path reservation prevents collisions, not deadlocks:
 ## with signals in the wrong places trains can wait on each other in a cycle.
@@ -640,7 +661,7 @@ func _update_deadlock_detection(delta: float) -> void:
 	if deadlocked_trains.is_empty() and _all_blocked_time > ALL_BLOCKED_TIMEOUT:
 		deadlocked_trains = trains.duplicate()
 	if not deadlocked_trains.is_empty():
-		_show_status("Deadlock — trains are waiting on each other (R to reset)")
+		_show_status("Deadlock — trains are waiting on each other (ESC to edit signals)")
 
 ## The trains forming a wait-for cycle, or [] when none exists. A walk only
 ## follows blocked trains, so a queue behind a moving or dwelling leader
@@ -672,7 +693,7 @@ func _depart_from_stop(tr: Train) -> void:
 	var progress := tr.segment_progress
 	var p: Platform = seg.platform
 	var reverse_seg := p.reverse_segment if seg == p.segment else p.segment
-	_dispatch_to_next_order(tr, seg.node_end)
+	_dispatch_to_next_order(tr, seg.node_end, seg)
 	if state == GameState.SIMULATING and tr.has_route():
 		tr.resume_from_stop(seg, progress, reverse_seg)
 		# Re-take the segment the consist sits on (set_route released it).
@@ -1077,7 +1098,7 @@ func _draw_train(tr: Train, color: Color) -> void:
 ## Draw HUD: money plus each train's passenger load in its colour.
 func _draw_hud() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-		"Money: %d | R to reset | V to toggle reservations" % money)
+		"Money: %d | ESC to stop and edit | R to reset | V to toggle reservations" % money)
 	var x := 10.0
 	for i in range(trains.size()):
 		var tr: Train = trains[i]

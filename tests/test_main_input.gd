@@ -8,6 +8,7 @@ func run_all() -> void:
 	_t("click_near_start_still_adds_waypoint", _test_near_start_waypoint)
 	_t("shallow_departure_click_is_waypoint", _test_shallow_departure_click)
 	_t("flat_rejoin_rejected_with_message", _test_flat_rejoin_rejected)
+	_t("escape_stops_sim_and_keeps_world", _test_escape_stops_sim)
 
 ## Draw-click handling lives on the main game node, so tests drive a real instance.
 func _main() -> Node2D:
@@ -80,6 +81,43 @@ func _test_shallow_departure_click() -> void:
 	eq(ed.waypoints.size(), 1)
 	eq(m.network.segments.size(), 4)
 	ed.cancel()
+	m.free()
+
+func _test_escape_stops_sim() -> void:
+	# ESC during a run returns to editing with the world intact: tracks, towns,
+	# roster, and money survive (the per-run fleet cost is refunded), and every
+	# reservation is released so a restart begins clean.
+	var m := _main()
+	var ed: TrackEditor = m.editor
+	ed.create_bidirectional_track(_junction(0, 0), _junction(1200, 0), [])
+	var a := Town.new(Vector2(300, 30), Color.WHITE)
+	var b := Town.new(Vector2(900, 30), Color.WHITE)
+	m.towns.assign([a, b])
+	ed.place_station(Vector2(300, 0), m.towns)
+	ed.place_station(Vector2(900, 0), m.towns)
+	m.roster[0].orders.assign([a, b])
+	m._buy_train()
+	m.roster[1].orders.assign([b, a])
+	var segments_before: int = m.network.segments.size()
+	m._start_simulation()
+	eq(m.state, m.GameState.SIMULATING)
+	eq(m.money, 1000.0 - 500.0 - 2 * 150.0)  # extra train + one extra car each
+	var esc := InputEventKey.new()
+	esc.keycode = KEY_ESCAPE
+	esc.pressed = true
+	m._input(esc)
+	eq(m.state, m.GameState.EDITING)
+	eq(m.trains.size(), 0)
+	eq(m.money, 1000.0)  # fleet cost refunded, nothing earned yet
+	eq(m.network.segments.size(), segments_before)
+	eq(m.towns.size(), 2)
+	eq(m.roster.size(), 2)
+	for seg in m.network.segments:
+		eq(seg.reserved_by, null)
+	# The run can start again immediately.
+	m._start_simulation()
+	eq(m.state, m.GameState.SIMULATING)
+	eq(m.trains.size(), 2)
 	m.free()
 
 func _test_flat_rejoin_rejected() -> void:

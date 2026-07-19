@@ -292,14 +292,17 @@ func _test_deadlock_detected() -> void:
 func _test_chase_no_deadlock() -> void:
 	var m := _main()
 	var ed: TrackEditor = m.editor
-	var c00 := NetworkNode.junction(Vector2(0, 0))
-	var c10 := NetworkNode.junction(Vector2(1200, 0))
-	var c11 := NetworkNode.junction(Vector2(1200, 1200))
-	var c01 := NetworkNode.junction(Vector2(0, 1200))
-	ed.create_bidirectional_track(c00, c10, [])
-	ed.create_bidirectional_track(c10, c11, [])
-	ed.create_bidirectional_track(c11, c01, [])
-	ed.create_bidirectional_track(c01, c00, [])
+	# An octagonal ring: 45° corner transitions, so through-running is legal
+	# (a square's 90° corners sit exactly on the switchback threshold).
+	var pts := [
+		Vector2(300, 0), Vector2(900, 0), Vector2(1200, 300), Vector2(1200, 900),
+		Vector2(900, 1200), Vector2(300, 1200), Vector2(0, 900), Vector2(0, 300),
+	]
+	var ring: Array = []
+	for p in pts:
+		ring.append(NetworkNode.junction(p))
+	for i in range(ring.size()):
+		ed.create_bidirectional_track(ring[i], ring[(i + 1) % ring.size()], [])
 	var a := Town.new(Vector2(400, 50), Color.WHITE)
 	var b := Town.new(Vector2(1150, 600), Color.WHITE)
 	var c := Town.new(Vector2(600, 1150), Color.WHITE)
@@ -592,7 +595,10 @@ func _reroute_world() -> Array:
 	ed.create_bidirectional_track(x, entry, [])
 	ed.create_bidirectional_track(entry, exit, [])
 	ed.create_bidirectional_track(exit, y, [])
-	var sy := ed.create_bidirectional_track(y, s, [Vector2(250, 350)] as Array[Vector2])
+	# The arc leaves y eastward-south and arrives at s from the north-east, so
+	# both junction transitions continue the direction of travel (no switchback).
+	var sy := ed.create_bidirectional_track(y, s,
+		[Vector2(620, 200), Vector2(200, 250)] as Array[Vector2])
 	var town := Town.new(Vector2(300, 50), Color.WHITE)
 	m.towns.assign([town])
 	is_true(ed.place_station(Vector2(300, 0), m.towns) != null)
