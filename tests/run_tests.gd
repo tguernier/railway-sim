@@ -14,6 +14,7 @@ func _initialize() -> void:
 		TestMultiTrain.new(),
 		TestGameSnapshot.new(),
 		TestUndo.new(),
+		TestMainInput.new(),
 	]
 
 	var total_pass := 0

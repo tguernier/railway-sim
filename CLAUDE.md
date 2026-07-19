@@ -33,7 +33,7 @@ main.gd (Node2D)          — game state, input handling, all drawing (_draw)
 │       └── Platform      — forward/reverse platform segment pair + side/width
 ├── TrainPlan[]           — edit-mode roster: per-train orders + car count
 └── Train[]               — moves along a route, boards/unloads passengers,
-                            holds track reservations (one Train per TrainPlan)
+							holds track reservations (one Train per TrainPlan)
 ```
 
 **Towns are not part of the track graph.** A town is a catchment circle that accumulates passengers. Building a station (on a track inside the town's radius) is what connects it to the railway: the hit segment is split into approach tracks and a platform segment with entry/exit junction nodes. Back-references (`Station.town`, `Platform.station`, `TrackSegment.platform`) are weakrefs to avoid RefCounted cycles.
@@ -42,7 +42,7 @@ main.gd (Node2D)          — game state, input handling, all drawing (_draw)
 
 ### Key systems
 
-**Track drawing** (`main.gd`, `track_editor.gd`): Click a junction or empty ground to start a track (empty ground creates a fresh junction), click empty space to add curve waypoints, click a junction or track to finish. Creating a segment automatically creates its reverse. `TrackSegment` wraps a `Curve2D` and exposes `position_at(t)`, `angle_at(t)`, and `length()`. Tracks are validated for curve radius and turnout angle at both ends.
+**Track drawing** (`main.gd`, `track_editor.gd`): Click a junction or empty ground to start a track (empty ground creates a fresh junction), click empty space to add curve waypoints, click a junction or track to finish. Creating a segment automatically creates its reverse. `TrackSegment` wraps a `Curve2D` and exposes `position_at(t)`, `angle_at(t)`, and `length()`. Tracks are validated for curve radius and turnout angle at both ends. A finish click on a track splits it into a junction (`finish_on_track`) — including the segment the drawing departed from, which is how a passing loop rejoins its own line as a pair of 3-way junctions. Waypoint-vs-join disambiguation is by distance from the start node (`hit_too_close_to_start`): a short sliver zone (`MIN_JOIN_DISTANCE`) on any track, a long one (`DEPARTURE_JOIN_DISTANCE`) on segments touching the start node, because the turnout limit forces departing loops to hug their line at first. A rejoin whose curve never swings `MIN_LOOP_OFFSET` clear of the segment it left is rejected (it would bury an identical-looking track under the original). Parallel tracks between the same two junctions are legal, so hit-testing (`find_track_at`) and rendering (`_draw_tracks`) deduplicate the two directions of a physical track by reverse-twin identity, never by endpoint positions.
 
 **Stations** (`track_editor.place_station`): Press `P`, click a track inside a town's circle. Validates: town has no station yet, segment ≥ `PLATFORM_LENGTH + 20`, platform span gentle enough, not already a platform. Span ends snap to existing endpoints when close (5% of length or `HIT_RADIUS`). Platform segments are protected — no splitting (junctions) and no deletion while the station exists; removing the town removes the station.
 

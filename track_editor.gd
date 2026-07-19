@@ -13,6 +13,16 @@ var waypoints: Array[Vector2] = []
 
 ## Hit-test distance for clicking on a track segment or junction.
 const HIT_RADIUS := 15.0
+## A track hit closer than this to the drawing's start node is treated as a
+## waypoint click, not a join — joining there would create a sliver segment.
+const MIN_JOIN_DISTANCE := HIT_RADIUS * 2.0
+## On segments touching the start node the waypoint zone extends farther: the
+## turnout limit forces shallow departures, so a loop's early waypoint clicks
+## inevitably land within the hit radius of the track being left.
+const DEPARTURE_JOIN_DISTANCE := 150.0
+## A track rejoining a segment it departs from must swing at least this far
+## clear of it somewhere, or the two would overlap indistinguishably on screen.
+const MIN_LOOP_OFFSET := HIT_RADIUS * 1.0
 ## Minimum allowed radius of curvature for a track segment (in pixels).
 const MIN_CURVE_RADIUS := 80.0
 ## Maximum allowed divergence angle (radians) between a new track and the nearest
@@ -151,6 +161,12 @@ func finish_on_track(hit: Array, continue_after := false) -> bool:
 		last_finish_rejected = true
 		rejection_reason = reason
 		return false
+	# Rejoining a segment the drawing departs from must produce a visible loop,
+	# not a second track hidden underneath the first.
+	if (seg.node_start == start_node or seg.node_end == start_node) \
+			and _max_offset_from(candidate, seg) < MIN_LOOP_OFFSET:
+		last_error = "New track overlaps the one it left — add waypoints to swing the loop clear"
+		return false
 	last_finish_rejected = false
 	rejection_reason = ""
 	var junction := split_track_at_hit(hit)
@@ -161,6 +177,20 @@ func finish_on_track(hit: Array, continue_after := false) -> bool:
 	else:
 		cancel()
 	return true
+
+## True when a find_track_at hit lands so close to the current drawing's start
+## node that it reads as a waypoint click, not a join. On the segments touching
+## the start node the protected zone is DEPARTURE_JOIN_DISTANCE (a departing
+## loop hugs that track at first); elsewhere it is MIN_JOIN_DISTANCE. Hits
+## beyond the zone are normal joins even on the departure segment — that's how
+## a passing loop closes back onto the track it left.
+func hit_too_close_to_start(hit: Array) -> bool:
+	var seg: TrackSegment = hit[0]
+	var t: float = hit[1]
+	var dist := seg.position_at(t).distance_to(start_node.position)
+	if seg.node_start == start_node or seg.node_end == start_node:
+		return dist < DEPARTURE_JOIN_DISTANCE
+	return dist < MIN_JOIN_DISTANCE
 
 ## Build a preview segment for the current drawing state (used for preview coloring).
 func build_preview_segment(mouse: Vector2) -> TrackSegment:
@@ -426,13 +456,16 @@ func find_track_at(pos: Vector2) -> Array:
 	var best_seg: TrackSegment = null
 	var best_dist := HIT_RADIUS
 	var best_t := 0.0
+	# Hit-test each physical track once: skip a segment whose reverse twin was
+	# already visited. Keying on endpoints would wrongly hide parallel tracks
+	# between the same two junctions (e.g. a passing loop).
 	var seen: Dictionary = {}
 	for seg in network.segments:
-		var key_a := "%s-%s" % [seg.node_start.position, seg.node_end.position]
-		var key_b := "%s-%s" % [seg.node_end.position, seg.node_start.position]
-		if seen.has(key_a) or seen.has(key_b):
+		if seen.has(seg):
 			continue
-		seen[key_a] = true
+		seen[seg] = true
+		if seg.reverse != null:
+			seen[seg.reverse] = true
 
 		var points := seg.get_baked_points()
 		var total_len := seg.length()
@@ -454,6 +487,13 @@ func find_track_at(pos: Vector2) -> Array:
 	return []
 
 # --- Internal helpers ---
+
+## Largest distance from any point of `candidate`'s curve to `track`'s path.
+static func _max_offset_from(candidate: TrackSegment, track: TrackSegment) -> float:
+	var worst := 0.0
+	for p in candidate.get_baked_points():
+		worst = maxf(worst, track.curve.get_closest_point(p).distance_to(p))
+	return worst
 
 ## Sample interior waypoints from a segment's curve between t_start and t_end.
 func _sample_curve_waypoints(seg: TrackSegment, t_start: float, t_end: float) -> Array[Vector2]:

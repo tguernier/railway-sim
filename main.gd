@@ -260,14 +260,12 @@ func _handle_draw_click(click_pos: Vector2, shift: bool) -> void:
 				_show_status(_rejection_message())
 			return
 		var track_hit := editor.find_track_at(click_pos)
-		if track_hit.size() > 0:
-			var hit_seg: TrackSegment = track_hit[0]
-			if hit_seg.node_start != editor.start_node and hit_seg.node_end != editor.start_node:
-				_push_undo_for_finish()
-				if not editor.finish_on_track(track_hit, true):
-					_discard_undo()
-					_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
-				return
+		if track_hit.size() > 0 and not editor.hit_too_close_to_start(track_hit):
+			_push_undo_for_finish()
+			if not editor.finish_on_track(track_hit, true):
+				_discard_undo()
+				_show_status(editor.last_error if editor.last_error != "" else _rejection_message())
+			return
 		_push_undo_for_finish()
 		var new_junction := NetworkNode.junction(click_pos)
 		network.add_node(new_junction)
@@ -278,8 +276,7 @@ func _handle_draw_click(click_pos: Vector2, shift: bool) -> void:
 	elif junction == null:
 		var track_hit := editor.find_track_at(click_pos)
 		if track_hit.size() > 0:
-			var hit_seg: TrackSegment = track_hit[0]
-			if hit_seg.node_start == editor.start_node or hit_seg.node_end == editor.start_node:
+			if editor.hit_too_close_to_start(track_hit):
 				editor.add_waypoint(click_pos)
 			else:
 				_push_undo_for_finish()
@@ -720,15 +717,18 @@ func _draw() -> void:
 		draw_string(ThemeDB.fallback_font, Vector2(10, 60), status_message,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.RED)
 
-## Draw tracks.
+## Draw tracks. Each physical track is drawn once: a segment is skipped when
+## its reverse twin was already drawn. Keying on endpoints would wrongly hide
+## parallel tracks between the same two junctions (e.g. a passing loop).
 func _draw_tracks() -> void:
 	var drawn: Dictionary = {}
 	for seg in network.segments:
-		var key_a := "%s-%s" % [seg.node_start.position, seg.node_end.position]
-		var key_b := "%s-%s" % [seg.node_end.position, seg.node_start.position]
-		if not drawn.has(key_a) and not drawn.has(key_b):
-			draw_polyline(seg.get_baked_points(), Color.GRAY, 3.0)
-			drawn[key_a] = true
+		if drawn.has(seg):
+			continue
+		drawn[seg] = true
+		if seg.reverse != null:
+			drawn[seg.reverse] = true
+		draw_polyline(seg.get_baked_points(), Color.GRAY, 3.0)
 
 ## Tint every reserved segment in its holder's colour (V toggles) — makes
 ## signal layouts debuggable and shows each train's claimed path.

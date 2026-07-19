@@ -42,6 +42,10 @@ func run_all() -> void:
 	_t("finish_on_track_steep_rejected_without_split", _test_finish_on_track_steep_no_split)
 	_t("finish_on_track_continue_keeps_drawing", _test_finish_on_track_continue)
 	_t("finish_on_track_platform_rejected", _test_finish_on_track_platform)
+	_t("finish_on_track_rejoins_departure_segment", _test_finish_on_track_rejoin)
+	_t("finish_on_track_coincident_rejoin_rejected", _test_finish_on_track_hug_rejected)
+	_t("find_track_at_finds_parallel_track", _test_find_track_parallel)
+	_t("hit_too_close_to_start_by_distance", _test_hit_too_close_to_start)
 	_t("place_station_creates_platform", _test_place_station)
 	_t("place_station_snaps_to_endpoint", _test_place_station_snaps)
 	_t("place_station_rejects_outside_town", _test_station_outside_town)
@@ -337,6 +341,64 @@ func _test_finish_on_track_platform() -> void:
 	is_false(ok)
 	is_true(ed.last_error != "")
 	eq(ed.network.segments.size(), 6)  # unchanged
+
+func _test_finish_on_track_rejoin() -> void:
+	# Passing loop: draw from a junction on a track and rejoin the very segment
+	# the drawing departed from, farther along — a 3-way junction at each end.
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(900, 0), [])
+	var j1 := ed.split_track_at_hit(ed.find_track_at(Vector2(150, 0)))
+	ed.start_drawing(j1)
+	ed.add_waypoint(Vector2(450, -40))
+	var hit := ed.find_track_at(Vector2(750, 0))
+	eq(hit[0].node_start == j1 or hit[0].node_end == j1, true)  # departure segment
+	var ok := ed.finish_on_track(hit)
+	is_true(ok)
+	is_false(ed.drawing)
+	# Original pair split twice (3 physical tracks) + the loop pair.
+	eq(ed.network.segments.size(), 8)
+	eq(ed.network.get_outgoing(j1).size(), 3)
+
+func _test_find_track_parallel() -> void:
+	# Two physical tracks between the same two junctions: both must hit-test.
+	var ed := _editor()
+	var a := _node(0, 0)
+	var b := _node(300, 0)
+	ed.create_bidirectional_track(a, b, [])
+	ed.create_bidirectional_track(a, b, [Vector2(150, -60)])
+	var hit := ed.find_track_at(Vector2(150, -60))
+	is_true(hit.size() > 0)
+	var pos: Vector2 = hit[0].position_at(hit[1])
+	approx(pos.distance_to(Vector2(150, -60)), 0.0, 5.0)
+
+func _test_finish_on_track_hug_rejected() -> void:
+	# A rejoin with no waypoints would lie exactly on top of the track it
+	# left — rejected with a message, and the network is untouched.
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(900, 0), [])
+	var j1 := ed.split_track_at_hit(ed.find_track_at(Vector2(150, 0)))
+	ed.start_drawing(j1)
+	var ok := ed.finish_on_track(ed.find_track_at(Vector2(750, 0)))
+	is_false(ok)
+	is_true(ed.drawing)
+	is_true(ed.last_error != "")
+	eq(ed.network.segments.size(), 4)
+
+func _test_hit_too_close_to_start() -> void:
+	var ed := _editor()
+	ed.create_bidirectional_track(_node(0, 0), _node(600, 0), [])
+	# Segments touching the start node carry the long departure waypoint zone.
+	ed.start_drawing(ed.network.nodes[0])  # (0, 0)
+	is_true(ed.hit_too_close_to_start(ed.find_track_at(Vector2(100, 0))))
+	is_false(ed.hit_too_close_to_start(ed.find_track_at(Vector2(300, 0))))
+	ed.cancel()
+	# From a node off the track only the short sliver zone applies.
+	var c := _node(20, 10)
+	ed.network.add_node(c)
+	ed.start_drawing(c)
+	is_true(ed.hit_too_close_to_start(ed.find_track_at(Vector2(25, 0))))
+	is_false(ed.hit_too_close_to_start(ed.find_track_at(Vector2(100, 0))))
+	ed.cancel()
 
 func _test_place_station() -> void:
 	var ed := _editor_with_track()
