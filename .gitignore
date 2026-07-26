@@ -2,3 +2,6 @@
 .godot/
 docs/
 .claude/
+
+# Exported builds
+build/

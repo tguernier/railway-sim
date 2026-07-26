@@ -1,0 +1,93 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a newer deploy supersede an in-flight one, but never cancel a run
+# that is already publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  GODOT_VERSION: 4.6.1
+  GODOT_RELEASE: stable
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Godot and export templates
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_RELEASE }}
+
+      - name: Install Godot and export templates
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-${GODOT_RELEASE}"
+          name="Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64"
+
+          mkdir -p ~/godot
+          curl -fsSL -o /tmp/godot.zip "${base}/${name}.zip"
+          unzip -q /tmp/godot.zip -d /tmp/godot-bin
+          mv "/tmp/godot-bin/${name}" ~/godot/godot
+          chmod +x ~/godot/godot
+
+          curl -fsSL -o /tmp/templates.tpz \
+            "${base}/Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_export_templates.tpz"
+          unzip -q /tmp/templates.tpz -d /tmp/templates
+          mkdir -p ~/.local/share/godot/export_templates
+          mv /tmp/templates/templates \
+            ~/.local/share/godot/export_templates/"${GODOT_VERSION}.${GODOT_RELEASE}"
+
+      - name: Add Godot to PATH
+        run: echo "$HOME/godot" >> "$GITHUB_PATH"
+
+      # .godot/ is gitignored, so the import cache is built from scratch here.
+      # A first import pass can report a non-zero status while still succeeding;
+      # the export step below is the real check that resources are present.
+      - name: Import resources
+        run: godot --headless --path . --import || true
+
+      - name: Run tests
+        run: godot --headless --path . --script res://tests/run_tests.gd
+
+      - name: Export web build
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          godot --headless --path . --export-release "Web" build/index.html
+          test -f build/index.html
+          test -f build/index.wasm
+          touch build/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
