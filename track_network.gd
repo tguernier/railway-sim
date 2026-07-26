@@ -19,6 +19,10 @@ const MAX_THROUGH_ANGLE := PI / 2.0
 var segments: Array[TrackSegment] = []
 ## All junction nodes in the network.
 var nodes: Array[NetworkNode] = []
+## Every flat crossing in the network. The same objects are registered on the
+## segments involved, which is where exclusion reads them; this list exists so
+## crossings can be drawn and cloned without walking every segment.
+var crossings: Array[TrackCrossing] = []
 ## Adjacency list mapping each node to its outgoing segments.
 var _outgoing: Dictionary = {}
 
@@ -28,19 +32,28 @@ func add_node(node: NetworkNode) -> void:
 		nodes.append(node)
 
 ## Add a track segment to the network (also registers its endpoint nodes).
-func add_segment(segment: TrackSegment) -> void:
+## Crossings against existing track are detected here — every structural edit
+## funnels through this call, so the crossing set cannot drift out of step
+## with the geometry. GameSnapshot opts out: it clones a network whose
+## crossings are already known, and re-detecting per segment would make undo
+## capture quadratic.
+func add_segment(segment: TrackSegment, detect_crossings := true) -> void:
 	segments.append(segment)
 	add_node(segment.node_start)
 	add_node(segment.node_end)
 	if not _outgoing.has(segment.node_start):
 		_outgoing[segment.node_start] = []
 	_outgoing[segment.node_start].append(segment)
+	if detect_crossings:
+		_detect_crossings(segment)
 
-## Remove a track segment from the network.
+## Remove a track segment from the network, along with any crossings on its
+## physical track.
 func remove_segment(segment: TrackSegment) -> void:
 	segments.erase(segment)
 	if _outgoing.has(segment.node_start):
 		_outgoing[segment.node_start].erase(segment)
+	_purge_crossings(segment)
 
 ## Get outgoing track segments from a node.
 func get_outgoing(node: NetworkNode) -> Array:
@@ -55,6 +68,72 @@ func get_incoming(node: NetworkNode) -> Array:
 		if seg.node_end == node:
 			result.append(seg)
 	return result
+
+# --- Flat crossings ---
+
+## Whether two segments meet at a shared endpoint. Such a pair joins at a
+## junction rather than crossing, so it is exempt from crossing detection —
+## the alternative is a crossover arm registering a spurious diamond against
+## the very track it lands on. The cost is that a segment which both meets and
+## genuinely crosses another (a loop swinging back over the line it left) has
+## its crossing missed; the editor's MIN_LOOP_OFFSET rule already discourages
+## that shape.
+static func shares_node(a: TrackSegment, b: TrackSegment) -> bool:
+	return a.node_start == b.node_start or a.node_start == b.node_end \
+		or a.node_end == b.node_start or a.node_end == b.node_end
+
+## Find and register every crossing a newly added segment makes. Skipped when
+## its reverse twin is already in the network: the twin's scan covered this
+## physical track and registered the results on all four directed segments, so
+## rescanning would only duplicate them.
+func _detect_crossings(segment: TrackSegment) -> void:
+	var twin := segment.reverse
+	if twin != null and twin != segment and segments.has(twin):
+		return
+	var seen: Dictionary = {}
+	for other in segments:
+		if other == segment or other == twin or seen.has(other):
+			continue
+		seen[other] = true
+		if other.reverse != null:
+			seen[other.reverse] = true
+		if shares_node(segment, other):
+			continue
+		for point in TrackSegment.crossing_points(segment, other):
+			register_crossing(segment, other, point)
+
+## Record a crossing between two tracks, on the network and on all four
+## directed segments involved. `known_angle` skips the tangent lookup when the
+## caller already has it (cloning a snapshot of identical geometry).
+func register_crossing(a: TrackSegment, b: TrackSegment, point: Vector2,
+		known_angle := -1.0) -> TrackCrossing:
+	var crossing := TrackCrossing.new()
+	crossing.position = point
+	crossing.angle = known_angle if known_angle >= 0.0 \
+		else TrackSegment.crossing_angle(a, b, point)
+	crossing.track_a = a
+	crossing.track_b = b
+	crossings.append(crossing)
+	for seg in [a, a.reverse, b, b.reverse]:
+		if seg != null and not seg.crossings.has(crossing):
+			seg.crossings.append(crossing)
+	return crossing
+
+## Drop every crossing on a removed segment's physical track, from the network
+## list and from the far track's segments. Idempotent: deletion paths remove
+## both twins, so this runs twice per physical track.
+func _purge_crossings(segment: TrackSegment) -> void:
+	for crossing in segment.crossings.duplicate():
+		crossings.erase(crossing)
+		var other: TrackSegment = crossing.other_track(segment)
+		if other != null:
+			other.crossings.erase(crossing)
+			if other.reverse != null:
+				other.reverse.crossings.erase(crossing)
+	segment.crossings.clear()
+	var twin := segment.reverse
+	if twin != null and twin != segment:
+		twin.crossings.clear()
 
 ## Remove a node if it has no connections. Returns true if removed.
 func cleanup_orphan(node: NetworkNode) -> bool:

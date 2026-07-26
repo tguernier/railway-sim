@@ -74,6 +74,8 @@ var next_color_index := 0
 
 ## Visual radius of a track waypoint dot.
 const WAYPOINT_RADIUS := 5.0
+## Visual size of a flat crossing marker (half-width).
+const CROSSING_RADIUS := 7.0
 ## Visual size of a junction diamond (half-width).
 const JUNCTION_RADIUS := 8.0
 ## How long status messages stay on screen, in seconds.
@@ -302,6 +304,11 @@ func _rejection_message() -> String:
 	if editor.rejection_reason == "turnout":
 		return "Turnout angle too steep (max %d°) — approach in line with the existing track" \
 			% int(rad_to_deg(TrackEditor.MAX_TURNOUT_ANGLE))
+	if editor.rejection_reason == "crossing":
+		return "Crosses another track too shallowly (min %d°) — cross it more squarely" \
+			% int(rad_to_deg(TrackEditor.MIN_CROSSING_ANGLE))
+	if editor.rejection_reason == "crossing_platform":
+		return "Tracks cannot cross a station platform"
 	return "Curve too tight — add waypoints for a gentler bend"
 
 ## Handles a left-click while nothing is being drawn.
@@ -545,7 +552,12 @@ func _start_simulation() -> void:
 		if tr.has_route():
 			tr.resume_from_stop(start_platform.segment,
 				tr.stop_point_on(start_platform.segment), start_platform.reverse_segment)
-			tr.try_reserve([tr.current_segment()])
+			# Distinct first stops are already required, but two platforms can
+			# still exclude each other through a flat crossing — a train that
+			# cannot hold the track it is standing on must not spawn.
+			if not tr.try_reserve([tr.current_segment()]):
+				_stop_simulation("Two trains start on tracks that cross — move a station")
+				return
 	# Only after every train's footprint is seeded may anyone reserve ahead —
 	# extending earlier could claim a path through a not-yet-spawned train.
 	# A failure just means the train starts out waiting (retried every move).
@@ -725,6 +737,7 @@ func _draw() -> void:
 	if state == GameState.SIMULATING and show_reservations:
 		_draw_reservations()
 	_draw_platforms()
+	_draw_crossings()
 	_draw_junctions()
 	_draw_signals()
 
@@ -820,6 +833,37 @@ func _draw_platform(platform: Platform, color: Color) -> void:
 	draw_polyline(far, color, 1.5)
 	draw_line(near[0], far[0], color, 1.5)
 	draw_line(near[near.size() - 1], far[far.size() - 1], color, 1.5)
+
+## Draw flat crossings as a small hollow lozenge — deliberately unlike the
+## filled white diamond of a junction, since a crossing connects nothing and
+## cannot be clicked, split, or signalled. While the reservation overlay is on
+## it takes the colour of the train holding the diamond.
+func _draw_crossings() -> void:
+	for crossing in network.crossings:
+		var p: Vector2 = crossing.position
+		var r := CROSSING_RADIUS
+		var color := Color.DIM_GRAY
+		if state == GameState.SIMULATING and show_reservations:
+			var holder := _crossing_holder(crossing)
+			if holder != null:
+				color = TRAIN_COLORS[trains.find(holder) % TRAIN_COLORS.size()]
+		draw_polyline(PackedVector2Array([
+			p + Vector2(0, -r), p + Vector2(r, 0),
+			p + Vector2(0, r), p + Vector2(-r, 0),
+			p + Vector2(0, -r),
+		]), color, 2.0)
+
+## The train whose reservation currently owns a crossing — the holder of
+## either crossing track, in either direction. Null while the diamond is free.
+func _crossing_holder(crossing: TrackCrossing) -> Train:
+	for track in [crossing.track_a, crossing.track_b]:
+		if track == null:
+			continue
+		if track.reserved_by != null:
+			return track.reserved_by
+		if track.reverse != null and track.reverse.reserved_by != null:
+			return track.reverse.reserved_by
+	return null
 
 ## Draw junction nodes as diamonds.
 func _draw_junctions() -> void:

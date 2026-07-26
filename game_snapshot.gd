@@ -35,8 +35,8 @@ static func capture(main) -> GameSnapshot:
 	# Bare segment clones. The curve is duplicated directly — a segment does
 	# not retain its waypoint list, so the curve is the source of truth.
 	for seg in main.network.segments:
-		var clone: TrackSegment = TrackSegment.new(node_map[seg.node_start], node_map[seg.node_end])
-		clone.curve = seg.curve.duplicate()
+		var clone := TrackSegment.from_curve(
+			node_map[seg.node_start], node_map[seg.node_end], seg.curve)
 		clone.exit_signal = seg.exit_signal
 		segment_map[seg] = clone
 	for seg in main.network.segments:
@@ -45,11 +45,25 @@ static func capture(main) -> GameSnapshot:
 
 	# Rebuild the network: add_segment restores the adjacency list; add_node
 	# covers junctions with no segments (e.g. a free-draw start node).
+	# Crossing detection is off — the geometry is unchanged, so the known set
+	# is cloned below instead of being re-derived at O(n²) per build action.
 	snap.network = TrackNetwork.new()
 	for seg in main.network.segments:
-		snap.network.add_segment(segment_map[seg])
+		snap.network.add_segment(segment_map[seg], false)
 	for node in main.network.nodes:
 		snap.network.add_node(node_map[node])
+
+	# Crossings, rewired onto the cloned segments — the same mapping the
+	# reverse twins get above.
+	for crossing in main.network.crossings:
+		var track_a: TrackSegment = crossing.track_a
+		var track_b: TrackSegment = crossing.track_b
+		if track_a == null or track_b == null:
+			continue
+		if not segment_map.has(track_a) or not segment_map.has(track_b):
+			continue
+		snap.network.register_crossing(segment_map[track_a], segment_map[track_b],
+			crossing.position, crossing.angle)
 
 	# Towns, with stations/platforms rewired onto the cloned segments.
 	var town_map := {}

@@ -390,9 +390,26 @@ func try_reserve(segs: Array) -> bool:
 	blocked_by = null
 	return true
 
-## The other train making a segment unavailable to this one — the holder of
-## the segment or of its reverse twin. Null when the segment is free.
+## The other train making a segment unavailable to this one: the holder of the
+## segment, of its reverse twin, or of a track it meets at a flat crossing —
+## a diamond belongs to both tracks, so only one train may hold it. Null when
+## the segment is free.
 func blocking_train(seg: TrackSegment) -> Train:
+	var holder := _holder_of(seg)
+	if holder != null:
+		return holder
+	for crossing in seg.crossings:
+		var other: TrackSegment = crossing.other_track(seg)
+		if other == null:
+			continue  # far side already freed
+		holder = _holder_of(other)
+		if holder != null:
+			return holder
+	return null
+
+## The train holding either direction of a physical track, unless that train
+## is this one. Null when the track is free.
+func _holder_of(seg: TrackSegment) -> Train:
 	if seg.reserved_by != null and seg.reserved_by != self:
 		return seg.reserved_by
 	var rev := seg.reverse
@@ -400,8 +417,8 @@ func blocking_train(seg: TrackSegment) -> Train:
 		return rev.reserved_by
 	return null
 
-## Whether a segment is unavailable to this train: it or its reverse twin is
-## reserved by a different train.
+## Whether a segment is unavailable to this train: it, its reverse twin, or a
+## track it crosses is reserved by a different train.
 func is_blocked(seg: TrackSegment) -> bool:
 	return blocking_train(seg) != null
 

@@ -25,6 +25,12 @@ const DEPARTURE_JOIN_DISTANCE := 150.0
 const MIN_LOOP_OFFSET := HIT_RADIUS * 1.0
 ## Minimum allowed radius of curvature for a track segment (in pixels).
 const MIN_CURVE_RADIUS := 80.0
+## Shallowest legal flat crossing. Below this the two tracks read as one
+## overlapping line — the same legibility concern MIN_LOOP_OFFSET guards for
+## rejoining loops. Chosen against the scissors case that has to work: a
+## crossover arm departs within MAX_TURNOUT_ANGLE and is steepest near its
+## middle, so two opposed arms cross at roughly 30-40°.
+const MIN_CROSSING_ANGLE := deg_to_rad(12.0)
 ## Maximum allowed divergence angle (radians) between a new track and the nearest
 ## existing track at a shared node (turnout angle). 15 degrees.
 const MAX_TURNOUT_ANGLE := deg_to_rad(15.0)
@@ -97,6 +103,28 @@ func _validate_track(from: NetworkNode, to: NetworkNode, wps: Array[Vector2]) ->
 		return "curve"
 	if not _validate_turnout_angle(from, candidate, true) or not _validate_turnout_angle(to, candidate, false):
 		return "turnout"
+	return validate_crossings(candidate)
+
+## Check a candidate segment against every track it would cross. Returns "" if
+## valid, "crossing" for a diamond too shallow to read as two tracks, or
+## "crossing_platform" for one over a station platform. Crossings at a shared
+## node are exempt (see TrackNetwork.shares_node) — that is what lets a
+## crossover arm land on the track it joins.
+func validate_crossings(candidate: TrackSegment) -> String:
+	var seen: Dictionary = {}
+	for other in network.segments:
+		if seen.has(other):
+			continue
+		seen[other] = true
+		if other.reverse != null:
+			seen[other.reverse] = true
+		if TrackNetwork.shares_node(candidate, other):
+			continue
+		for point in TrackSegment.crossing_points(candidate, other):
+			if other.is_platform_segment():
+				return "crossing_platform"
+			if TrackSegment.crossing_angle(candidate, other, point) < MIN_CROSSING_ANGLE:
+				return "crossing"
 	return ""
 
 ## Check that a new segment's departure angle at a node doesn't diverge too much
@@ -157,6 +185,11 @@ func finish_on_track(hit: Array, continue_after := false) -> bool:
 		var track_angles: Array[float] = [seg.angle_at(t)]
 		if min_divergence(track_angles, candidate.angle_at(1.0) + PI) > MAX_TURNOUT_ANGLE:
 			reason = "turnout"
+		else:
+			# The candidate's own end node is fresh, so it shares no node with
+			# the segment it lands on; the endpoint clearance in
+			# crossing_points is what keeps the join out of the crossing test.
+			reason = validate_crossings(candidate)
 	if reason != "":
 		last_finish_rejected = true
 		rejection_reason = reason
@@ -351,6 +384,11 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 	if platform_seg.min_radius_of_curvature() < MIN_CURVE_RADIUS:
 		last_error = "Track too curved for a platform"
 		return null
+	# The mirror of the "no crossings over a platform" drawing rule: here the
+	# crossing already exists and the player is converting the track under it.
+	if _span_contains_crossing(seg, t_start, t_end):
+		last_error = "Cannot build a platform across a track crossing"
+		return null
 
 	# Replace the hit segment with approach tracks + the platform pair.
 	var reverse := seg.reverse
@@ -494,6 +532,17 @@ static func _max_offset_from(candidate: TrackSegment, track: TrackSegment) -> fl
 	for p in candidate.get_baked_points():
 		worst = maxf(worst, track.curve.get_closest_point(p).distance_to(p))
 	return worst
+
+## Whether any flat crossing on a segment falls within a span of it.
+func _span_contains_crossing(seg: TrackSegment, t_start: float, t_end: float) -> bool:
+	var total := seg.length()
+	if total <= 0.0:
+		return false
+	for crossing in seg.crossings:
+		var offset: float = seg.curve.get_closest_offset(crossing.position)
+		if offset >= t_start * total and offset <= t_end * total:
+			return true
+	return false
 
 ## Sample interior waypoints from a segment's curve between t_start and t_end.
 func _sample_curve_waypoints(seg: TrackSegment, t_start: float, t_end: float) -> Array[Vector2]:
