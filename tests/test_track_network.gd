@@ -49,6 +49,9 @@ func run_all() -> void:
 	_t("one_way_signal_bars_reverse_direction", _test_one_way_signal_bars)
 	_t("one_way_signal_forces_other_branch", _test_one_way_forces_branch)
 	_t("unroutable_when_only_path_is_one_way_against", _test_one_way_unroutable_stop)
+	_t("loose_one_way_passable_against_for_a_penalty", _test_loose_one_way_passable)
+	_t("loose_one_way_prefers_the_way_round", _test_loose_one_way_prefers_way_round)
+	_t("loose_one_way_keeps_order_loop_routable", _test_loose_one_way_keeps_loop_routable)
 	_t("penalty_prefers_free_branch", _test_penalty_prefers_free_branch)
 	_t("penalty_all_blocked_returns_shortest", _test_penalty_all_blocked)
 	_t("reverse_twin_reservation_penalizes", _test_reverse_twin_penalized)
@@ -324,6 +327,64 @@ func _test_one_way_forces_branch() -> void:
 	eq(west.size(), 3)
 	is_true(west.has(branch2.reverse))
 	is_false(west.has(branch1.reverse))
+
+func _test_loose_one_way_passable() -> void:
+	# The same line as _test_one_way_signal_bars, but the one-way is loose:
+	# the unserved direction stays routable, priced at ONE_WAY_PENALTY.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(100, 0)
+	var b := _node(200, 0)
+	var aj := _twin(net, a, j)
+	_twin(net, j, b)
+	aj.exit_signal = true
+	aj.loose_one_way = true
+	eq(net.find_route(a, b).size(), 2)  # the served direction is untouched
+	var west := net.find_route(b, a)
+	eq(west.size(), 2)  # passable from behind, unlike a strict one-way
+	approx(net.route_cost(west, null), 200.0 + TrackNetwork.ONE_WAY_PENALTY)
+	aj.loose_one_way = false  # strict again — and barred again
+	eq(net.find_route(b, a).size(), 0)
+
+func _test_loose_one_way_prefers_way_round() -> void:
+	# a ══ j ══ b direct (200 px), plus a gentle 312 px detour a-m1-m2-b. A
+	# loose one-way at j serving eastbound leaves the direct westbound route
+	# legal but dearer than the long way round, so the detour wins.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var j := _node(100, 0)
+	var b := _node(200, 0)
+	var m1 := _node(60, 100)
+	var m2 := _node(140, 100)
+	var aj := _twin(net, a, j)
+	_twin(net, j, b)
+	_twin(net, a, m1)
+	_twin(net, m1, m2)
+	_twin(net, m2, b)
+	eq(net.find_route(b, a).size(), 2)  # unsignalled: straight down the line
+	aj.exit_signal = true
+	aj.loose_one_way = true
+	eq(net.find_route(b, a).size(), 3)  # now round by m2 and m1
+	eq(net.find_route(a, b).size(), 2)  # eastbound still takes the short way
+
+func _test_loose_one_way_keeps_loop_routable() -> void:
+	# The layout _test_one_way_unroutable_stop rejects: a loose one-way on the
+	# only link leaves the order loop valid, which is the whole point of the
+	# variant — a shared single line can carry a signal for its waiting point
+	# without cutting the return leg.
+	var net := TrackNetwork.new()
+	var a := _node(0, 0)
+	var b := _node(120, 0)
+	var c := _node(240, 0)
+	var d := _node(360, 0)
+	var p1 := _platform(net, a, b)
+	var p2 := _platform(net, c, d)
+	var link := _twin(net, b, c)
+	link.exit_signal = true
+	link.loose_one_way = true
+	eq(net.first_unroutable_stop([p1, p2]), -1)
+	link.loose_one_way = false
+	eq(net.first_unroutable_stop([p1, p2]), 0)
 
 func _test_one_way_unroutable_stop() -> void:
 	# p1(a-b) —— p2(c-d) joined by one twin pair; the loop validates until a

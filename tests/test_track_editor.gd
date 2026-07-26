@@ -56,7 +56,7 @@ func run_all() -> void:
 	_t("delete_rejected_on_platform", _test_delete_rejected_on_platform)
 	_t("remove_town_removes_station", _test_remove_town)
 	_t("signal_placed_two_way_on_split", _test_signal_place)
-	_t("signal_cycles_one_way_then_removes", _test_signal_cycle)
+	_t("signal_cycles_loose_then_strict_then_removes", _test_signal_cycle)
 	_t("signal_rejected_on_platform", _test_signal_on_platform)
 	_t("signal_rejected_on_real_junction", _test_signal_on_junction)
 	_t("split_preserves_signal_flags", _test_split_preserves_signals)
@@ -527,22 +527,46 @@ func _test_signal_place() -> void:
 	eq(_signal_count(ed), 2)
 
 func _test_signal_cycle() -> void:
+	# two-way → loose one-way → the other loose → strict → the other strict →
+	# removed → two-way again. Loose comes first: it is the milder variant.
 	var ed := _editor_with_track()
 	ed.place_or_cycle_signal(Vector2(150, 0))  # two-way
-	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # one-way
+	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # loose one-way
 	eq(_signal_count(ed), 1)
-	var first_dir: TrackSegment = null
-	for seg in ed.network.segments:
-		if seg.exit_signal:
-			first_dir = seg
-	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # the other one-way
+	var loose_first := _signalled(ed)
+	is_true(loose_first.loose_one_way)
+
+	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # the other loose one-way
 	eq(_signal_count(ed), 1)
-	is_false(first_dir.exit_signal)  # the direction flipped
+	is_false(loose_first.exit_signal)  # the direction flipped
+	is_true(_signalled(ed).loose_one_way)
+
+	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # strict one-way
+	eq(_signal_count(ed), 1)
+	var strict_first := _signalled(ed)
+	is_false(strict_first.loose_one_way)
+	eq(strict_first, loose_first)  # strict starts from the same direction
+
+	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # the other strict one-way
+	eq(_signal_count(ed), 1)
+	is_false(strict_first.exit_signal)
+	is_false(_signalled(ed).loose_one_way)
+
 	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # removed
 	eq(_signal_count(ed), 0)
 	eq(ed.network.segments.size(), 4)  # the split junction remains
 	is_true(ed.place_or_cycle_signal(Vector2(150, 0)))  # back to two-way
 	eq(_signal_count(ed), 2)
+	# A two-way signal leaves no stale one-way strictness behind.
+	for seg in ed.network.segments:
+		is_false(seg.loose_one_way)
+
+## The single segment carrying a signal (only meaningful for a one-way).
+func _signalled(ed: TrackEditor) -> TrackSegment:
+	for seg in ed.network.segments:
+		if seg.exit_signal:
+			return seg
+	return null
 
 func _test_signal_on_platform() -> void:
 	var ed := _editor_with_track()

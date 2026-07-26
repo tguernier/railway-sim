@@ -37,7 +37,7 @@ static func capture(main) -> GameSnapshot:
 	for seg in main.network.segments:
 		var clone := TrackSegment.from_curve(
 			node_map[seg.node_start], node_map[seg.node_end], seg.curve)
-		clone.exit_signal = seg.exit_signal
+		clone.copy_signal_from(seg)
 		segment_map[seg] = clone
 	for seg in main.network.segments:
 		if seg.reverse != null and segment_map.has(seg.reverse):

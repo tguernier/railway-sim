@@ -777,7 +777,9 @@ func _draw_reservations() -> void:
 ## Draw path signals as a pole-and-lamp dot beside the exit of each signalled
 ## segment, on the right-hand side of the direction served (so one-way
 ## signals read correctly). Red by default, green while a reservation passes
-## through the signal.
+## through the signal. A strict one-way also gets a bar across the far side of
+## the track — the "no entry" the opposing direction meets; a loose one-way
+## leaves that side clear, since trains may still come through it.
 func _draw_signals() -> void:
 	for seg in network.segments:
 		if not seg.exit_signal:
@@ -792,6 +794,15 @@ func _draw_signals() -> void:
 		draw_line(pos + side * 4.0, lamp, Color.DIM_GRAY, 2.0)
 		var lit := Color.LIME_GREEN if _signal_is_green(seg) else Color.RED
 		draw_circle(lamp, 3.5, lit)
+		if _is_strict_one_way(seg):
+			draw_line(pos - side * 4.0, pos - side * 10.0, Color.DARK_RED, 3.0)
+
+## Whether a signalled segment's signal is a strict one-way — the network's
+## routing rule is the authority, so a signal only draws its no-entry bar when
+## the opposing direction really is barred.
+func _is_strict_one_way(seg: TrackSegment) -> bool:
+	return seg.reverse != null \
+		and network.one_way_against(seg.reverse) == TrackNetwork.OneWay.STRICT
 
 ## A signal shows green while its holder's reservation continues past it —
 ## the train may traverse the signalled segment and at least one more.
@@ -952,7 +963,7 @@ func _draw_editor_overlay() -> void:
 			"STATION: Click a track inside a town's circle | ESC/P to cancel")
 	elif placing_signal:
 		draw_string(ThemeDB.fallback_font, Vector2(10, 20),
-			"SIGNALS: Click a track to place | Click a signal to cycle two-way > one-way > remove | ESC/S to finish")
+			"SIGNALS: Click a track to place | Click a signal to cycle two-way > loose one-way > strict one-way > remove | ESC/S to finish")
 	elif editor.drawing:
 		_draw_curvature_preview()
 		for wp in editor.waypoints:

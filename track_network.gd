@@ -8,6 +8,22 @@ extends RefCounted
 ## beneath the penalty.
 const BLOCKED_PENALTY := 10000.0
 
+## Cost added for entering a segment against a *loose* one-way signal. Well
+## below BLOCKED_PENALTY on purpose: running the wrong way past a loose signal
+## is safe (reservations still keep trains apart), so a train takes the barred
+## direction rather than queue behind occupied track. Players who want the
+## harder guarantee reach for the strict variant instead. Still large enough to
+## dominate any plausible detour, so a legal way round always wins.
+const ONE_WAY_PENALTY := 2000.0
+
+## How a one-way signal facing the other way affects entry into a directed
+## segment. See one_way_against.
+enum OneWay {
+	NONE,    ## no one-way signal against this direction
+	LOOSE,   ## passable from behind, but the pathfinder avoids it
+	STRICT,  ## routing in this direction is barred outright
+}
+
 ## Maximum heading change through a junction (end of the arriving segment vs
 ## start of the departing one). Junctions are turnouts: genuine continuations
 ## diverge by at most the turnout angle, while going back the way you came is
@@ -143,21 +159,27 @@ func cleanup_orphan(node: NetworkNode) -> bool:
 		return true
 	return false
 
-## Whether a directed segment may not be entered because the junction at its
-## start hosts a one-way signal facing the other way — as in OpenTTD, a
-## one-way path signal is a hard "no entry" for the unserved direction, which
-## is what lets players make passing-loop branches directional. The segment's
-## twin arriving at that junction carries the signal; the direction is barred
-## unless some other arriving segment (the through continuation) carries one
-## too, which would make the signal two-way.
-func one_way_against(seg: TrackSegment) -> bool:
+## How the one-way signal at a directed segment's start (if any) treats entry
+## in that direction. The segment's twin arriving at that junction is what
+## carries the signal; it is only one-way if no other arriving segment (the
+## through continuation) carries one too, which would make it two-way.
+##
+## STRICT is OpenTTD's one-way path signal: a hard "no entry" that makes
+## passing-loop branches directional. LOOSE is its plain path signal: the
+## direction stays passable from behind, only penalized, so a bidirectional
+## single line can carry a one-way signal purely for its *waiting point* —
+## trains going the signalled way may stand at it, trains coming the other way
+## have no stopping place there and must reserve straight through. That is
+## what keeps a branch train back on its branch instead of stranding it across
+## the junction it just crossed.
+func one_way_against(seg: TrackSegment) -> OneWay:
 	var twin := seg.reverse
 	if twin == null or not twin.exit_signal:
-		return false
+		return OneWay.NONE
 	for arriving in get_incoming(seg.node_start):
 		if arriving != twin and arriving.exit_signal:
-			return false  # a signal serves this direction too — two-way
-	return true
+			return OneWay.NONE  # a signal serves this direction too — two-way
+	return OneWay.LOOSE if twin.loose_one_way else OneWay.STRICT
 
 ## Whether a train arriving on prev can roll onto next without reversing:
 ## the reverse twin never continues, and the departure heading must stay
@@ -238,16 +260,20 @@ func first_unroutable_stop(platforms: Array) -> int:
 		arriving = route[-1]
 	return -1
 
-## Cost of a route for a train: total length plus BLOCKED_PENALTY for each
-## segment unavailable to it (mirrors find_route's relaxation). Also what a
-## train's per-extension lookahead uses to compare its provisional tail
-## against the re-pathed alternative.
+## Cost of a route for a train: total length, plus BLOCKED_PENALTY for each
+## segment unavailable to it and ONE_WAY_PENALTY for each entered against a
+## loose one-way signal (mirrors find_route's relaxation — the lookahead
+## compares the two, so they must agree). Also what a train's per-extension
+## lookahead uses to weigh its provisional tail against the re-pathed
+## alternative.
 func route_cost(route: Array, for_train: Train) -> float:
 	var total := 0.0
 	for seg in route:
 		total += seg.length()
 		if for_train != null and for_train.is_blocked(seg):
 			total += BLOCKED_PENALTY
+		if one_way_against(seg) == OneWay.LOOSE:
+			total += ONE_WAY_PENALTY
 	return total
 
 ## Find the shortest route between two nodes using Dijkstra (weighted by
@@ -303,8 +329,9 @@ func find_route(from: NetworkNode, to: NetworkNode, for_train: Train = null,
 			return path
 
 		for seg in get_outgoing(node):
-			if one_way_against(seg):
-				continue  # a one-way signal bars entry in this direction
+			var against := one_way_against(seg)
+			if against == OneWay.STRICT:
+				continue  # a strict one-way signal bars entry in this direction
 			if not _hop_allowed(prev, seg, path.size() == 0, allow_reversal):
 				continue  # reversing through a junction is not a move
 			if visited.has(seg):
@@ -314,6 +341,8 @@ func find_route(from: NetworkNode, to: NetworkNode, for_train: Train = null,
 			var new_cost: float = cost + seg.length()
 			if for_train != null and for_train.is_blocked(seg):
 				new_cost += BLOCKED_PENALTY
+			if against == OneWay.LOOSE:
+				new_cost += ONE_WAY_PENALTY
 			queue.append([new_cost, seg.node_end, new_path])
 
 	return []

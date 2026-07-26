@@ -20,6 +20,9 @@ func run_all() -> void:
 	_t("lookahead_skipped_at_anchored_platform", _test_reroute_anchored_skip)
 	_t("lookahead_keeps_near_equal_free_tail", _test_hysteresis_keeps_tail)
 	_t("lookahead_adopts_much_shorter_free_tail", _test_adopts_shorter_tail)
+	_t("branch_junction_deadlocks_on_two_way_signals", _test_branch_two_way_deadlock)
+	_t("branch_junction_strict_one_way_is_unroutable", _test_branch_strict_one_way_unroutable)
+	_t("branch_junction_loose_one_way_holds_train_on_branch", _test_branch_loose_one_way)
 	_t("nose_to_nose_deadlock_detected", _test_deadlock_detected)
 	_t("queue_behind_moving_leader_not_deadlocked", _test_chase_no_deadlock)
 	_t("all_blocked_timeout_flags_deadlock", _test_all_blocked_timeout)
@@ -264,6 +267,129 @@ func _test_passing_loop() -> void:
 	is_true(disjoint)
 	is_true(saw_pass)  # they really crossed inside the loop
 	is_false(flagged)  # no deadlock — the loop actually works now
+	is_true(wrapped[0])
+	is_true(wrapped[1])
+	m.free()
+
+## Three towns on a main line with one branch:
+##
+##   S1 ══════ X ═ J ═ Z ══════ S2      (main line, y = 300)
+##                 ╲
+##                  Y ╲____ S3          (branch, rising north-east)
+##
+## The branch trails into the junction facing west, so both S2 and S3 traffic
+## shares the single line between S1 and J. X, Y and Z are signal nodes on the
+## three approaches to the junction. Returns the towns and those nodes.
+func _branch_junction(m: Node2D) -> Dictionary:
+	var ed: TrackEditor = m.editor
+	var x := NetworkNode.junction(Vector2(700, 300))
+	var j := NetworkNode.junction(Vector2(800, 300))
+	var z := NetworkNode.junction(Vector2(900, 300))
+	var y := NetworkNode.junction(Vector2(900, 240))
+	ed.create_bidirectional_track(NetworkNode.junction(Vector2(100, 300)), x, [])
+	ed.create_bidirectional_track(x, j, [])
+	ed.create_bidirectional_track(j, z, [])
+	ed.create_bidirectional_track(z, NetworkNode.junction(Vector2(1600, 300)), [])
+	ed.create_bidirectional_track(j, y, [])
+	ed.create_bidirectional_track(y, NetworkNode.junction(Vector2(1500, 60)), [])
+	var t1 := Town.new(Vector2(300, 340), Color.WHITE)
+	var t2 := Town.new(Vector2(1250, 340), Color.WHITE)
+	var t3 := Town.new(Vector2(1200, 110), Color.WHITE)
+	m.towns.assign([t1, t2, t3])
+	ed.place_station(Vector2(300, 300), m.towns)
+	ed.place_station(Vector2(1250, 300), m.towns)
+	ed.place_station(Vector2(1200, 150), m.towns)
+	# Train 1 shuttles S1 ↔ S2 along the main line, train 2 S3 ↔ S1 off the
+	# branch; they meet on the shared western approach.
+	m.roster[0].orders.assign([t1, t2])
+	m._buy_train()
+	m.roster[1].orders.assign([t3, t1])
+	return {"x": x, "j": j, "z": z, "y": y}
+
+## Put a two-way signal on every direction arriving at a node.
+func _two_way_signal(net: TrackNetwork, node: NetworkNode) -> void:
+	for seg in net.get_incoming(node):
+		seg.exit_signal = true
+
+## Put a one-way signal at a node serving only the eastbound direction (the
+## one running into the junction on the shared approach).
+func _one_way_signal_east(net: TrackNetwork, node: NetworkNode, loose: bool) -> void:
+	for arriving in net.get_incoming(node):
+		var seg: TrackSegment = arriving
+		var eastbound := seg.node_start.position.x < node.position.x
+		seg.exit_signal = eastbound
+		seg.loose_one_way = eastbound and loose
+
+func _test_branch_two_way_deadlock() -> void:
+	# Two-way signals put the branch train's waiting point on the *far* side
+	# of the junction: it crosses onto the shared line and stops there, nose
+	# to nose with the main-line train coming the other way.
+	var m := _main()
+	var n := _branch_junction(m)
+	_two_way_signal(m.network, n["x"])
+	_two_way_signal(m.network, n["y"])
+	_two_way_signal(m.network, n["z"])
+	m._start_simulation()
+	eq(m.state, m.GameState.SIMULATING)
+	var flagged := false
+	for tick in range(3600):  # 60 s
+		m._process(1.0 / 60.0)
+		if not m.deadlocked_trains.is_empty():
+			flagged = true
+			break
+	is_true(flagged)
+	# Both trains are stranded on the main line, one of them the branch train.
+	for tr in m.trains:
+		approx(tr.current_position().y, 300.0, 1.0)
+	m.free()
+
+func _test_branch_strict_one_way_unroutable() -> void:
+	# The obvious fix — a one-way signal on the shared approach — is not
+	# available with the strict variant: barring the westbound direction cuts
+	# every route back to S1, so the layout never starts.
+	var m := _main()
+	var n := _branch_junction(m)
+	_one_way_signal_east(m.network, n["x"], false)
+	_two_way_signal(m.network, n["y"])
+	_two_way_signal(m.network, n["z"])
+	m._start_simulation()
+	eq(m.state, m.GameState.EDITING)
+	is_true(m.status_message.contains("no track route"))
+	m.free()
+
+func _test_branch_loose_one_way() -> void:
+	# The loose variant keeps the westbound direction open while removing its
+	# waiting point at X, so a westbound train may not stop on the shared
+	# approach — it holds back at the branch signal instead, clear of the
+	# junction, until the main line train has passed.
+	var m := _main()
+	var n := _branch_junction(m)
+	_one_way_signal_east(m.network, n["x"], true)
+	_two_way_signal(m.network, n["y"])
+	_two_way_signal(m.network, n["z"])
+	m._start_simulation()
+	eq(m.state, m.GameState.SIMULATING)
+	var disjoint := true
+	var flagged := false
+	var waited_on_branch := false
+	var wrapped := [false, false]
+	for tick in range(3600):  # 60 s
+		m._process(1.0 / 60.0)
+		if not _reservations_disjoint(m.trains):
+			disjoint = false
+		if not m.deadlocked_trains.is_empty():
+			flagged = true
+		# The behaviour being bought: the branch train halted while still on
+		# the branch (north of the main line), not fouling the junction.
+		if m.trains[1].waiting_for_track and m.trains[1].current_position().y < 290.0:
+			waited_on_branch = true
+		for i in range(m.trains.size()):
+			if m.trains[i].current_order_index == 0:
+				wrapped[i] = true
+	eq(m.state, m.GameState.SIMULATING)
+	is_true(disjoint)
+	is_false(flagged)  # no deadlock — the layout runs indefinitely
+	is_true(waited_on_branch)
 	is_true(wrapped[0])
 	is_true(wrapped[1])
 	m.free()

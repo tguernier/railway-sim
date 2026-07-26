@@ -282,9 +282,9 @@ func split_track_at_hit(hit: Array) -> NetworkNode:
 	var second := create_bidirectional_track(junction, seg.node_end, wp_second)
 	# A signal at either end of the split track stays with the half that still
 	# ends there.
-	second.exit_signal = seg.exit_signal
+	second.copy_signal_from(seg)
 	if reverse != null:
-		first.reverse.exit_signal = reverse.exit_signal
+		first.reverse.copy_signal_from(reverse)
 
 	return junction
 
@@ -399,11 +399,11 @@ func place_station(pos: Vector2, towns: Array[Town]) -> Station:
 		var approach_in := create_bidirectional_track(seg.node_start, entry,
 			_sample_curve_waypoints(seg, 0.0, t_start))
 		if reverse != null:
-			approach_in.reverse.exit_signal = reverse.exit_signal
+			approach_in.reverse.copy_signal_from(reverse)
 	if not snap_end:
 		var approach_out := create_bidirectional_track(exit, seg.node_end,
 			_sample_curve_waypoints(seg, t_end, 1.0))
-		approach_out.exit_signal = seg.exit_signal
+		approach_out.copy_signal_from(seg)
 	var reversed_wps: Array[Vector2] = []
 	for i in range(platform_wps.size() - 1, -1, -1):
 		reversed_wps.append(platform_wps[i])
@@ -454,6 +454,18 @@ func place_or_cycle_signal(pos: Vector2) -> bool:
 	last_error = ""
 	return true
 
+## The signal state carried by the two directions arriving at a node, in click
+## order. Loose comes before strict: it is the milder of the two, and the one
+## that suits a line still worked in both directions.
+enum SignalState {
+	NONE,
+	TWO_WAY,
+	LOOSE_A,   ## one-way serving a, opposing direction penalized
+	LOOSE_B,
+	STRICT_A,  ## one-way serving a, opposing direction barred
+	STRICT_B,
+}
+
 ## Cycle the signal at a junction. Only plain through-nodes qualify — exactly
 ## two directed segments arriving, one per direction of the same physical
 ## track (signal splits and old waypoint splits both produce these).
@@ -468,17 +480,27 @@ func _cycle_signal_at(junction: NetworkNode) -> bool:
 	last_error = ""
 	var a: TrackSegment = arriving[0]
 	var b: TrackSegment = arriving[1]
-	if a.exit_signal and b.exit_signal:
-		b.exit_signal = false  # two-way → one-way
-	elif a.exit_signal:
-		a.exit_signal = false  # one-way → the other one-way
-		b.exit_signal = true
-	elif b.exit_signal:
-		b.exit_signal = false  # one-way → removed (the junction remains)
-	else:
-		a.exit_signal = true  # bare junction → two-way signal
-		b.exit_signal = true
+	var next := (_signal_state(a, b) + 1) % SignalState.size()
+	_apply_signal_state(a, b, next as SignalState)
 	return true
+
+## The state the two arriving directions currently encode.
+func _signal_state(a: TrackSegment, b: TrackSegment) -> SignalState:
+	if a.exit_signal and b.exit_signal:
+		return SignalState.TWO_WAY
+	if a.exit_signal:
+		return SignalState.LOOSE_A if a.loose_one_way else SignalState.STRICT_A
+	if b.exit_signal:
+		return SignalState.LOOSE_B if b.loose_one_way else SignalState.STRICT_B
+	return SignalState.NONE
+
+## Write a state onto the two arriving directions. loose_one_way is cleared
+## wherever it is meaningless, so equal states always compare equal.
+func _apply_signal_state(a: TrackSegment, b: TrackSegment, state: SignalState) -> void:
+	a.exit_signal = state in [SignalState.TWO_WAY, SignalState.LOOSE_A, SignalState.STRICT_A]
+	b.exit_signal = state in [SignalState.TWO_WAY, SignalState.LOOSE_B, SignalState.STRICT_B]
+	a.loose_one_way = state == SignalState.LOOSE_A
+	b.loose_one_way = state == SignalState.LOOSE_B
 
 # --- Hit testing ---
 

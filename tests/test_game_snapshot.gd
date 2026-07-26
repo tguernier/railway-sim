@@ -162,6 +162,14 @@ func _test_signal_flags() -> void:
 	var clone := _seg_between(snap.network, Vector2(0, 0), Vector2(600, 0))
 	is_true(clone.exit_signal)
 	is_false(clone.reverse.exit_signal)  # a one-way signal stays one-way
+	is_false(clone.loose_one_way)  # ...and strict stays strict
+
+	# The loose flag travels with the signal, so undo cannot quietly turn a
+	# loose one-way into a strict one (which would bar routes it allowed).
+	_seg_between(m.network, Vector2(0, 0), Vector2(600, 0)).loose_one_way = true
+	var loose := _seg_between(GameSnapshot.capture(m).network, Vector2(0, 0), Vector2(600, 0))
+	is_true(loose.exit_signal)
+	is_true(loose.loose_one_way)
 	m.free()
 
 func _test_isolation() -> void:

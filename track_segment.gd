@@ -54,6 +54,21 @@ var reserved_by: Train:
 ## this flag on both twins; a one-way signal on only one.
 var exit_signal := false
 
+## For a one-way signal (this segment flagged, its twin not), how the unserved
+## direction is treated: strict by default — barred from routing outright, as
+## OpenTTD's one-way path signal — or loose, merely penalized, so the track
+## stays passable from behind like OpenTTD's plain path signal. Meaningless
+## without exit_signal, and on a two-way signal (neither direction is
+## unserved); kept false in both cases so the flag pair stays canonical.
+var loose_one_way := false
+
+## Copy another segment's signal state onto this one. The two flags always
+## travel together — splits, station placement, and snapshot cloning all move
+## a signal from one segment object to another.
+func copy_signal_from(src: TrackSegment) -> void:
+	exit_signal = src.exit_signal
+	loose_one_way = src.loose_one_way
+
 ## Whether this segment is occupied by a station platform.
 func is_platform_segment() -> bool:
 	return platform != null

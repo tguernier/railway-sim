@@ -8,5 +8,5 @@ This is a 2D top down railway company simulator game with a minimalist vector gr
 - Stations
 - Multiple trains with per-train orders
 - Passenger generation (basic)
-- Track segment occupancy detection / track reservations
-- Path based signalling (WIP)
+- Track segment occupancy detection / track reservations with crossover detection
+- Path based signalling with two-way / strict one way / loose one way signals
