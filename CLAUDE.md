@@ -18,6 +18,16 @@ There is no separate build step or lint tool. Run the unit tests headlessly with
 godot --path /home/tom/code/railway-sim --headless --script res://tests/run_tests.gd
 ```
 
+## Web port (`web/`)
+
+A static HTML + JS port with basic 3D graphics (three.js 0.160.0, vendored at `web/vendor/three.module.js` and mapped via an importmap — no build step, no npm dependencies, works offline). Serve the folder and open it (ES modules don't load from `file://`):
+```
+cd web && python3 -m http.server 8000    # then http://localhost:8000
+```
+Run its tests (a line-for-line port of the GDScript suite) with `node web/tests/run_tests.js`.
+
+Each `web/src/*.js` module mirrors the `.gd` file of the same name (camelCase API; GDScript weakrefs become plain references). `vec2.js` and `curve2d.js` stand in for Godot's `Vector2`/`Rect2`/`Geometry2D` and `Curve2D` (Bézier spans baked to ~5 px polylines). `main.gd` is split in two: `game.js` (`Game` — state, rules, and input via plain event objects `{type: 'motion'|'mouse'|'key', …}`, so tests and the browser drive the same `handleInput`) and `renderer.js` (three.js scene). The renderer maps game pixels onto the ground plane as `(x, 0, y)`; it rebuilds the static scene whenever `Game.worldVersion` changes, re-poses pooled train meshes each frame, and draws text on a 2D canvas over the WebGL one. `main.js` wires DOM input and owns the camera controls (wheel zoom, middle-drag pan, Shift+middle-drag orbit, arrow keys, Q/E). Logic changes should land in both ports, with their tests.
+
 ## Architecture
 
 All game entities are `RefCounted` (not Nodes), managed and rendered by `main.gd`.

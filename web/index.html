@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Railway Sim</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%239acd32'/%3E%3Cpath d='M6 26 L13 6 M26 26 L19 6' stroke='%23555' stroke-width='3'/%3E%3Cpath d='M9 20h14M11 14h10' stroke='%236e5845' stroke-width='3'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --hud-bg: rgba(20, 28, 18, 0.62);
+      --hud-fg: #f4f6f0;
+      --status: #ff5a4f;
+      --muted: rgba(244, 246, 240, 0.7);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #bfe3f5;
+      font: 500 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    #app { position: fixed; inset: 0; }
+    #app canvas { position: absolute; inset: 0; display: block; }
+    #app canvas.labels { pointer-events: none; }
+    .panel {
+      position: fixed;
+      left: 16px;
+      max-width: calc(100vw - 32px);
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--hud-bg);
+      color: var(--hud-fg);
+      pointer-events: none;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+    }
+    #top { top: 12px; display: flex; flex-direction: column; gap: 3px; }
+    #roster, #trains { font-weight: 700; }
+    /* Train colours are dark, so they mark a swatch rather than the text. */
+    #roster::before, #trains span::before {
+      content: '';
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 6px;
+      border-radius: 50%;
+      vertical-align: -1px;
+      background: var(--swatch);
+      box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+    }
+    #trains { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+    #status { color: var(--status); font-weight: 700; }
+    #help { bottom: 12px; color: var(--muted); font-size: 12px; }
+    [hidden] { display: none !important; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="top" class="panel">
+    <div id="hint"></div>
+    <div id="roster"></div>
+    <div id="trains" hidden></div>
+    <div id="status" hidden></div>
+  </div>
+  <div id="help" class="panel">Camera: wheel to zoom · middle-drag to pan · Shift+middle-drag to orbit · arrow keys pan · Q / E rotate</div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

@@ -16,64 +16,28 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
-env:
-  GODOT_VERSION: 4.6.1
-  GODOT_RELEASE: stable
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Godot and export templates
-        id: cache-godot
-        uses: actions/cache@v4
+      - uses: actions/setup-node@v4
         with:
-          path: |
-            ~/godot
-            ~/.local/share/godot/export_templates
-          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_RELEASE }}
-
-      - name: Install Godot and export templates
-        if: steps.cache-godot.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-${GODOT_RELEASE}"
-          name="Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64"
-
-          mkdir -p ~/godot
-          curl -fsSL -o /tmp/godot.zip "${base}/${name}.zip"
-          unzip -q /tmp/godot.zip -d /tmp/godot-bin
-          mv "/tmp/godot-bin/${name}" ~/godot/godot
-          chmod +x ~/godot/godot
-
-          curl -fsSL -o /tmp/templates.tpz \
-            "${base}/Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_export_templates.tpz"
-          unzip -q /tmp/templates.tpz -d /tmp/templates
-          mkdir -p ~/.local/share/godot/export_templates
-          mv /tmp/templates/templates \
-            ~/.local/share/godot/export_templates/"${GODOT_VERSION}.${GODOT_RELEASE}"
-
-      - name: Add Godot to PATH
-        run: echo "$HOME/godot" >> "$GITHUB_PATH"
-
-      # .godot/ is gitignored, so the import cache is built from scratch here.
-      # A first import pass can report a non-zero status while still succeeding;
-      # the export step below is the real check that resources are present.
-      - name: Import resources
-        run: godot --headless --path . --import || true
+          node-version: 22
 
       - name: Run tests
-        run: godot --headless --path . --script res://tests/run_tests.gd
+        run: node web/tests/run_tests.js
 
-      - name: Export web build
+      # The web port is static files with no build step: publish only what
+      # the page loads (not the tests or package.json).
+      - name: Assemble site
         run: |
           set -euo pipefail
           mkdir -p build
-          godot --headless --path . --export-release "Web" build/index.html
+          cp -r web/index.html web/src web/vendor build/
           test -f build/index.html
-          test -f build/index.wasm
+          test -f build/vendor/three.module.js
           touch build/.nojekyll
 
       - name: Upload Pages artifact
