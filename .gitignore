@@ -1,7 +1,6 @@
-# Godot editor state and caches (auto-regenerated)
-.godot/
+# Local-only notes and tool state
 docs/
 .claude/
 
-# Exported builds
+# Assembled Pages site (see .github/workflows/deploy-pages.yml)
 build/

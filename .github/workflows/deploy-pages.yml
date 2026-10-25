@@ -27,15 +27,15 @@ jobs:
           node-version: 22
 
       - name: Run tests
-        run: node web/tests/run_tests.js
+        run: node tests/run_tests.js
 
-      # The web port is static files with no build step: publish only what
+      # The game is static files with no build step: publish only what
       # the page loads (not the tests or package.json).
       - name: Assemble site
         run: |
           set -euo pipefail
           mkdir -p build
-          cp -r web/index.html web/src web/vendor build/
+          cp -r index.html src vendor build/
           test -f build/index.html
           test -f build/vendor/three.module.js
           touch build/.nojekyll

@@ -254,7 +254,7 @@ export class TrackNetwork {
     const visited = new Set();
 
     while (queue.length > 0) {
-      // Find the lowest-cost entry (first wins on ties, as in the original).
+      // Find the lowest-cost entry (the first one wins ties).
       let bestIdx = 0;
       for (let i = 1; i < queue.length; i++) {
         if (queue[i][0] < queue[bestIdx][0]) bestIdx = i;

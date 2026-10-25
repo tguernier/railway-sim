@@ -22,10 +22,9 @@ export const TRAIN_COLORS = [
   '#006400', '#663399', '#8b4513',
 ];
 
-// Game state, rules and input handling — the port of main.gd minus its
-// drawing, which lives in renderer.js. Input arrives as plain event objects
-// (see handleInput) so the browser front end and the tests drive the same
-// entry point:
+// Game state, rules and input handling (drawing lives in renderer.js). Input
+// arrives as plain event objects (see handleInput) so the browser front end
+// and the tests drive the same entry point:
 //   { type: 'motion', pos }
 //   { type: 'mouse', button: 'left' | 'right', shift, pos }
 //   { type: 'key', code }   — a KeyboardEvent.code, e.g. 'KeyR', 'Space'

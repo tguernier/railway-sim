@@ -1,4 +1,4 @@
-// Minimal test harness mirroring the Godot suite's TestBase: suites register
+// Minimal test harness: suites register
 // named tests with t(); assertions count passes/failures and print detail on
 // failure only.
 import { Vec2 } from '../src/vec2.js';

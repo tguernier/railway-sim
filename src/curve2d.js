@@ -1,9 +1,8 @@
 import { Vec2 } from './vec2.js';
 
-// Stand-in for Godot's Curve2D: a chain of cubic Bézier spans given as points
-// with in/out handles, baked into a polyline with points roughly
-// BAKE_INTERVAL apart. Everything the game reads (length, sampling, closest
-// offset) works off the baked polyline, as in Godot.
+// A chain of cubic Bézier spans given as points with in/out handles, baked
+// into a polyline with points roughly BAKE_INTERVAL apart. Everything the game reads (length, sampling, closest
+// offset) works off the baked polyline.
 export const BAKE_INTERVAL = 5.0;
 // Samples per span used to measure arc length before even resampling.
 const MEASURE_STEPS = 64;

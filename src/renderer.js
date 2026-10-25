@@ -6,7 +6,7 @@ import { OneWay } from './track_network.js';
 import { Train } from './train.js';
 import { circumradius } from './track_segment.js';
 
-// Three.js view of the game. Game coordinates are the original's 2D pixels
+// Three.js view of the game. Game coordinates are top-down 2D pixels
 // (x right, y down); the 3D world puts them on the ground plane as (x, 0, y),
 // so one pixel is one world unit and the camera looks "north" (-z) by default.
 //
@@ -46,8 +46,8 @@ const COLORS = {
 
 // --- Geometry helpers ---
 
-// Lateral unit vector at each polyline vertex: Godot's orthogonal() of the
-// local tangent, so offsets match the 2D game's sides.
+// Lateral unit vector at each polyline vertex: Vec2.orthogonal() of the
+// local tangent, so offsets match the game logic's sides (Platform.side).
 function lateralNormals(points) {
   const out = [];
   for (let i = 0; i < points.length; i++) {
@@ -174,7 +174,7 @@ export class Renderer {
     this.scene.fog = new THREE.Fog('#bfe3f5', 4000, 9000);
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 5, 20000);
-    // Orbit rig around a ground target. Defaults frame the original's
+    // Orbit rig around a ground target. Defaults frame a classic
     // 1152×648 window.
     this.rig = {
       target: new THREE.Vector3(576, 0, 324),
@@ -224,7 +224,7 @@ export class Renderer {
 
     this.resize();
     // Narrow (portrait) viewports start zoomed out far enough to show the
-    // original's 1152 px-wide play area.
+    // 1152 px-wide play area.
     this.rig.distance *= Math.max(1, 1.6 / this.camera.aspect);
     this.applyCamera();
     window.addEventListener('resize', () => this.resize());

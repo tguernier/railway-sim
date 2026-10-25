@@ -1,5 +1,5 @@
-// Immutable 2D vector — the subset of Godot's Vector2 the game logic uses.
-// World coordinates are the original game's pixels: x right, y down.
+// Immutable 2D vector.
+// Game coordinates are top-down pixels: x right, y down.
 export class Vec2 {
   constructor(x = 0, y = 0) {
     this.x = x;
@@ -27,8 +27,8 @@ export class Vec2 {
     return l === 0 ? new Vec2(0, 0) : new Vec2(this.x / l, this.y / l);
   }
 
-  // Godot's Vector2.orthogonal(): rotated 90° counter-clockwise in math
-  // terms, i.e. (y, -x).
+  // Perpendicular (y, -x): rotated 90° counter-clockwise in math terms —
+  // with y pointing down, that is to the left of the direction of travel.
   orthogonal() { return new Vec2(this.y, -this.x); }
 
   rotated(a) {
@@ -51,14 +51,14 @@ export function clamp(v, lo, hi) {
 export function degToRad(d) { return d * Math.PI / 180; }
 export function radToDeg(r) { return r * 180 / Math.PI; }
 
-// Godot's global angle_difference(from, to): the shortest signed angle from
+// angleDifference(from, to): the shortest signed angle from
 // `from` to `to`, in [-PI, PI].
 export function angleDifference(from, to) {
   const diff = (to - from) % TAU;
   return ((2 * diff) % TAU) - diff;
 }
 
-// Godot's Geometry2D.segment_intersects_segment: the intersection point of
+// The intersection point of
 // segments a-b and c-d, or null.
 export function segmentIntersectsSegment(a, b, c, d) {
   const r = b.sub(a);
@@ -72,7 +72,7 @@ export function segmentIntersectsSegment(a, b, c, d) {
   return a.add(r.mul(t));
 }
 
-// Godot's Rect2 subset: axis-aligned bounds with grow/expand/intersects.
+// Axis-aligned bounds with grow/expand/intersects.
 export class Rect2 {
   constructor(minX, minY, maxX, maxY) {
     this.minX = minX; this.minY = minY; this.maxX = maxX; this.maxY = maxY;
