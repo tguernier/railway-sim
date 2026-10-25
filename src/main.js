@@ -1,5 +1,6 @@
 import { Game, GameState, TRAIN_COLORS } from './game.js';
 import { Renderer } from './renderer.js';
+import { OrdersPanel } from './orders_panel.js';
 
 // Browser front end: wires DOM input to Game.handleInput, runs the frame
 // loop, and keeps the HUD text in step with the game.
@@ -7,6 +8,7 @@ import { Renderer } from './renderer.js';
 const game = new Game();
 const view = new Renderer(game, document.getElementById('app'));
 const canvas = view.canvas;
+const ordersPanel = new OrdersPanel(game, document.getElementById('orders'));
 const hud = {
   hint: document.getElementById('hint'),
   roster: document.getElementById('roster'),
@@ -71,6 +73,8 @@ canvas.addEventListener('wheel', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  // A focused dropdown in the orders panel keeps its own keys (arrows, Space).
+  if (e.target instanceof HTMLSelectElement) return;
   if (e.code in PAN_KEYS || e.code in ROTATE_KEYS) {
     e.preventDefault();
     held.add(e.code);
@@ -132,6 +136,7 @@ function frame(now) {
   game.process(delta);
   view.render();
   updateHud();
+  ordersPanel.update();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

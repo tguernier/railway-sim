@@ -16,6 +16,21 @@ export const TOWN_PALETTE = [
   '#ffa500', '#9370db', '#5f9ea0',
   '#fa8072', '#008b8b', '#daa520',
 ];
+// Names given to new towns, in placement order (numbered once exhausted).
+export const TOWN_NAMES = [
+  'Ashford', 'Brookvale', 'Carrow', 'Dunmere', 'Elmstead', 'Fernhill',
+  'Glenbury', 'Harwick', 'Ivybridge', 'Kestrel', 'Larkfield', 'Millbrook',
+  'Northcote', 'Oakham', 'Pendle', 'Quarry Bank', 'Redmoor', 'Stonely',
+  'Thornbury', 'Upwell', 'Valemouth', 'Westerby', 'Yarrow', 'Zennor',
+];
+
+// The name for the index-th town placed.
+export function townName(index) {
+  const base = TOWN_NAMES[index % TOWN_NAMES.length];
+  const round = Math.floor(index / TOWN_NAMES.length);
+  return round === 0 ? base : `${base} ${round + 1}`;
+}
+
 // Colours identifying each train (head car, order badges, route preview).
 export const TRAIN_COLORS = [
   '#2f4f4f', '#191970', '#8b0000',
@@ -398,7 +413,7 @@ export class Game {
   // Handles inputs while editing train orders.
   _handleOrderInput(event) {
     if (event.type === 'mouse') {
-      if (event.button === 'left') this._toggleOrderStop(event.pos);
+      if (event.button === 'left') this._clickOrderStop(event.pos);
       else if (event.button === 'right') this._popOrderStop();
     }
     if (event.type === 'key') {
@@ -417,29 +432,114 @@ export class Game {
     }
   }
 
-  // Add or remove the clicked town as a train order stop. Each actual edit
-  // of the order list is one undo step; the station-missing rejection is not.
-  _toggleOrderStop(pos) {
+  // Append the clicked town to the selected train's orders. A station may be
+  // visited several times in one loop (A → B → C → B), so clicking an
+  // existing stop adds it again rather than removing it — removal is
+  // right-click (last stop) or the orders panel.
+  _clickOrderStop(pos) {
     const town = this._findTownAt(pos);
-    if (town === null) return;
-    const idx = this.trainOrders.indexOf(town);
-    if (idx >= 0) {
-      this._pushUndo();
-      this.trainOrders.splice(idx, 1);
-    } else if (town.station === null) {
-      this._showStatus('Town needs a station before it can be a stop');
-    } else {
-      this._pushUndo();
-      this.trainOrders.push(town);
-    }
+    if (town !== null) this.addOrder(this.selectedTrain, town);
   }
 
   // Remove the last train order stop, as one undo step.
   _popOrderStop() {
-    if (this.trainOrders.length > 0) {
-      this._pushUndo();
-      this.trainOrders.pop();
+    const orders = this.trainOrders;
+    if (orders.length > 0) this.removeOrder(this.selectedTrain, orders.length - 1);
+  }
+
+  // --- Order editing API (keyboard/map input and the orders panel) ---
+  // Every successful edit is one undo step; rejected edits burn none and
+  // explain themselves in the status line. All are edit-mode only.
+
+  // Append a stop to a train's orders. Rejected when the town has no
+  // station, or when it would directly repeat the stop before it (a train
+  // cannot travel from a platform to itself).
+  addOrder(trainIndex, town) {
+    if (this.state !== GameState.EDITING) return false;
+    const orders = this.roster[trainIndex].orders;
+    if (town.station === null) {
+      this._showStatus('Town needs a station before it can be a stop');
+      return false;
     }
+    if (orders.length > 0 && orders[orders.length - 1] === town) {
+      this._showStatus(`${town.name || 'That town'} is already the previous stop — add a different stop in between`);
+      return false;
+    }
+    this._pushUndo();
+    orders.push(town);
+    return true;
+  }
+
+  // Remove one stop from a train's orders.
+  removeOrder(trainIndex, orderIndex) {
+    if (this.state !== GameState.EDITING) return false;
+    const orders = this.roster[trainIndex].orders;
+    if (orderIndex < 0 || orderIndex >= orders.length) return false;
+    this._pushUndo();
+    orders.splice(orderIndex, 1);
+    return true;
+  }
+
+  // Move a stop up (delta -1) or down (+1) in a train's orders.
+  moveOrder(trainIndex, orderIndex, delta) {
+    if (this.state !== GameState.EDITING) return false;
+    const orders = this.roster[trainIndex].orders;
+    const target = orderIndex + delta;
+    if (orderIndex < 0 || orderIndex >= orders.length || target < 0 || target >= orders.length) return false;
+    this._pushUndo();
+    [orders[orderIndex], orders[target]] = [orders[target], orders[orderIndex]];
+    return true;
+  }
+
+  // Remove every stop from a train's orders.
+  clearOrders(trainIndex) {
+    if (this.state !== GameState.EDITING) return false;
+    const orders = this.roster[trainIndex].orders;
+    if (orders.length === 0) return false;
+    this._pushUndo();
+    orders.length = 0;
+    return true;
+  }
+
+  // Set a train's car count, clamped to 1..maxCarCount(). Like the [ / ]
+  // keys, not an undo step.
+  setCarCount(trainIndex, count) {
+    if (this.state !== GameState.EDITING) return false;
+    this.roster[trainIndex].carCount = Math.max(1, Math.min(count, this.maxCarCount()));
+    return true;
+  }
+
+  // Make a roster train the one the keyboard and map clicks edit.
+  selectTrain(trainIndex) {
+    if (trainIndex < 0 || trainIndex >= this.roster.length) return;
+    this.selectedTrain = trainIndex;
+  }
+
+  // What is wrong with a plan's order list on its own terms, or '' when it
+  // is fine. Routing is checked only at simulation start (it needs Dijkstra
+  // over the whole loop). The loop wraps, so the last stop must not repeat
+  // the first either.
+  static orderProblem(plan) {
+    const orders = plan.orders;
+    if (orders.length < 2) return 'needs at least 2 stops';
+    for (let i = 0; i < orders.length; i++) {
+      if (orders[i].station === null || orders[i].station.platforms.length === 0) {
+        return `stop ${i + 1} has no station`;
+      }
+      const next = (i + 1) % orders.length;
+      if (orders[i] === orders[next]) {
+        return `stops ${i + 1} and ${next + 1} are the same station back to back`;
+      }
+    }
+    return '';
+  }
+
+  // Fleet cost charged at simulation start: every train and car beyond the
+  // first of each.
+  fleetCost() {
+    let total = (this.roster.length - 1) * Game.TRAIN_COST;
+    for (const plan of this.roster) total += (plan.carCount - 1) * Game.COST_PER_CAR;
+    return total;
   }
 
   // Buy a new train (appended to the roster and selected), as one undo
@@ -450,14 +550,16 @@ export class Game {
     this.selectedTrain = this.roster.length - 1;
   }
 
-  // Sell the selected train, as one undo step. The roster never goes empty.
-  _sellTrain() {
+  // Sell a train (the selected one by default), as one undo step. The
+  // roster never goes empty.
+  _sellTrain(trainIndex = this.selectedTrain) {
     if (this.roster.length <= 1) {
       this._showStatus('The last train cannot be sold');
       return;
     }
     this._pushUndo();
-    this.roster.splice(this.selectedTrain, 1);
+    this.roster.splice(trainIndex, 1);
+    if (this.selectedTrain > trainIndex) this.selectedTrain -= 1;
     this.selectedTrain = Math.min(this.selectedTrain, this.roster.length - 1);
   }
 
@@ -486,8 +588,8 @@ export class Game {
   _placeTown(pos) {
     this._pushUndo();
     const col = TOWN_PALETTE[this.nextColorIndex % TOWN_PALETTE.length];
+    this.towns.push(new Town(pos, col, townName(this.nextColorIndex)));
     this.nextColorIndex += 1;
-    this.towns.push(new Town(pos, col));
   }
 
   // --- Simulation ---
@@ -497,21 +599,14 @@ export class Game {
   _startSimulation() {
     if (this.network.segments.length === 0) return;
     const firstStops = new Map();
-    let totalCost = (this.roster.length - 1) * Game.TRAIN_COST;
     for (let i = 0; i < this.roster.length; i++) {
       const plan = this.roster[i];
-      if (plan.orders.length < 2) {
-        this._showStatus(`Train ${i + 1} needs at least 2 stops`);
+      const problem = Game.orderProblem(plan);
+      if (problem !== '') {
+        this._showStatus(`Train ${i + 1} ${problem}`);
         return;
       }
-      const stopPlatforms = [];
-      for (const town of plan.orders) {
-        if (town.station === null || town.station.platforms.length === 0) {
-          this._showStatus('All stops need a station before starting');
-          return;
-        }
-        stopPlatforms.push(town.station.platforms[0]);
-      }
+      const stopPlatforms = plan.orders.map((town) => town.station.platforms[0]);
       const unroutable = this.network.firstUnroutableStop(stopPlatforms);
       if (unroutable !== -1) {
         this._showStatus(`Train ${i + 1}: no track route to stop ${unroutable + 1} — connect it to the other stops`);
@@ -525,8 +620,8 @@ export class Game {
         return;
       }
       firstStops.set(first, i);
-      totalCost += (plan.carCount - 1) * Game.COST_PER_CAR;
     }
+    const totalCost = this.fleetCost();
     if (this.money < totalCost) {
       this._showStatus(`Not enough money for the fleet (costs ${Math.trunc(totalCost)}: ${Game.TRAIN_COST} per extra train, ${Game.COST_PER_CAR} per extra car)`);
       return;
@@ -747,7 +842,7 @@ export class Game {
       return `Money: ${Math.trunc(this.money)} | ESC to stop and edit | R to reset | V to toggle reservations`;
     }
     if (this.editingOrders) {
-      let hint = `ORDERS (Train ${this.selectedTrain + 1}): Click towns with stations to add/remove stops | RIGHT-CLICK to remove last | , . to switch train | U to undo | ESC/O to finish`;
+      let hint = `ORDERS (Train ${this.selectedTrain + 1}): Click towns with stations to append stops (repeats allowed) | RIGHT-CLICK to remove last | , . to switch train | U to undo | ESC/O to finish`;
       if (this.readyToStart()) hint += ' | SPACE to start simulation';
       return hint;
     }

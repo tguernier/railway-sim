@@ -301,11 +301,17 @@ export class TrackEditor {
   }
 
   // Remove a town from the map: tear down its station (if any) and drop it
-  // from the town list and every train's order list.
+  // from the town list and every train's order list. A town can be a stop
+  // several times over, so every occurrence goes; stops left back to back
+  // (A → town → A becomes A → A) collapse into one.
   removeTown(town, towns, orderLists = []) {
     this.removeStation(town);
     erase(towns, town);
-    for (const orders of orderLists) erase(orders, town);
+    for (const orders of orderLists) {
+      const kept = orders.filter((stop) => stop !== town);
+      const collapsed = kept.filter((stop, i) => i === 0 || stop !== kept[i - 1]);
+      orders.splice(0, orders.length, ...collapsed);
+    }
   }
 
   // Remove a town's station: delete its platform segments and clean up the

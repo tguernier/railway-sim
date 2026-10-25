@@ -173,7 +173,7 @@ export function runAll() {
     const m = new Game();
     const town = townWithStation(m, 0);
     m.editingOrders = true;
-    m._toggleOrderStop(town.position);
+    m._clickOrderStop(town.position);
     eq(m.trainOrders.length, 1);
     eq(m.undoStack.length, 1);
     m._undo();
@@ -184,7 +184,7 @@ export function runAll() {
     const town = new Town(V(300, 300), '#fff');
     m.towns.push(town);
     m.editingOrders = true;
-    m._toggleOrderStop(town.position);
+    m._clickOrderStop(town.position);
     eq(m.trainOrders.length, 0);
     isTrue(m.statusMessage !== '');
     eq(m.undoStack.length, 0);
@@ -194,7 +194,7 @@ export function runAll() {
     const a = townWithStation(m, 0);
     const b = townWithStation(m, 400);
     m.trainOrders.push(a, b);
-    m._toggleOrderStop(a.position);
+    m.removeOrder(0, 0);
     eq(m.trainOrders.length, 1);
     eq(m.undoStack.length, 1);
     m._undo();

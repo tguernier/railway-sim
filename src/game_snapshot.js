@@ -71,7 +71,7 @@ export class GameSnapshot {
     // Towns, with stations/platforms rewired onto the cloned segments.
     const townMap = new Map();
     for (const town of game.towns) {
-      const townClone = new Town(town.position, town.color);
+      const townClone = new Town(town.position, town.color, town.name);
       townClone.radius = town.radius;
       townClone.waiting = town.waiting;
       if (town.station !== null) {

@@ -5,6 +5,11 @@ This is a railway company simulator game with a minimalist vector graphics aesth
 
 You can play the latest version of the game in the web browser at: https://tguernier.github.io/railway-sim/
 
+To run the game locally:
+```bash
+python3 -m http.server 8000
+```
+
 ## Features (so far)
 - Track building with realistic curves / junctions
 - Stations

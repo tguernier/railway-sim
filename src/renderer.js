@@ -786,10 +786,39 @@ export class Renderer {
     ctx.fillText(text, x, y);
   }
 
+  // A rounded badge whose left end sits where a single-number circle would:
+  // 24 px tall, widening to fit lists like "2 · 4".
+  _badge(text, x, y, color, ring) {
+    const ctx = this.ctx;
+    ctx.font = '600 14px system-ui, -apple-system, "Segoe UI", sans-serif';
+    const w = Math.max(24, ctx.measureText(text).width + 14);
+    const left = x - 12;
+    const pill = (pad) => {
+      ctx.beginPath();
+      ctx.roundRect(left - pad, y - 12 - pad, w + pad * 2, 24 + pad * 2, 12 + pad);
+    };
+    pill(0);
+    ctx.fillStyle = color;
+    ctx.fill();
+    if (ring) {
+      pill(1.5);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+    }
+    this._text(text, left + w / 2, y + 1, '#ffffff', 14, 'center');
+  }
+
   _drawLabels() {
     const ctx = this.ctx;
     const g = this.game;
     ctx.clearRect(0, 0, this.container.clientWidth, this.container.clientHeight);
+
+    for (const town of g.towns) {
+      if (town.name === '') continue;
+      const s = this._project(town.position.add(new Vec2(0, town.radius)), 0);
+      if (s !== null) this._text(town.name, s.x, s.y + 12, '#ffffff', 13, 'center');
+    }
 
     if (g.state === GameState.SIMULATING) {
       for (const town of g.towns) {
@@ -809,29 +838,20 @@ export class Renderer {
       return;
     }
 
-    // Order badges, one row per roster train in its colour; the selected
-    // train's badges get a white ring.
+    // Order badges: one per station per train, listing every visit's stop
+    // number (a station may be visited several times in a loop), one row
+    // per roster train in its colour; the selected train's get a white ring.
     g.roster.forEach((plan, ti) => {
-      const color = TRAIN_COLORS[ti % TRAIN_COLORS.length];
+      const visits = new Map();
       plan.orders.forEach((stop, i) => {
+        if (!visits.has(stop)) visits.set(stop, []);
+        visits.get(stop).push(i + 1);
+      });
+      for (const [stop, numbers] of visits) {
         const anchor = stop.position.add(new Vec2(stop.radius, -stop.radius).mul(0.75));
         const s = this._project(anchor, 0);
-        if (s === null) return;
-        const x = s.x;
-        const y = s.y + ti * 28;
-        ctx.beginPath();
-        ctx.arc(x, y, 12, 0, TAU);
-        ctx.fillStyle = color;
-        ctx.fill();
-        if (ti === g.selectedTrain) {
-          ctx.lineWidth = 2;
-          ctx.strokeStyle = '#ffffff';
-          ctx.beginPath();
-          ctx.arc(x, y, 13.5, 0, TAU);
-          ctx.stroke();
-        }
-        this._text(String(i + 1), x, y + 1, '#ffffff', 14, 'center');
-      });
+        if (s !== null) this._badge(numbers.join(' · '), s.x, s.y + ti * 28, TRAIN_COLORS[ti % TRAIN_COLORS.length], ti === g.selectedTrain);
+      }
     });
 
     const ed = g.editor;

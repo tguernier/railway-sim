@@ -14,6 +14,7 @@ const suites = [
   './test_game_snapshot.js',
   './test_undo.js',
   './test_main_input.js',
+  './test_orders.js',
 ];
 
 for (const path of suites) {
