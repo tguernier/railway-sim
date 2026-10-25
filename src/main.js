@@ -1,18 +1,18 @@
-import { Game, GameState, TRAIN_COLORS } from './game.js';
+import { Game } from './game.js';
 import { Renderer } from './renderer.js';
 import { OrdersPanel } from './orders_panel.js';
+import { Toolbar } from './toolbar.js';
 
 // Browser front end: wires DOM input to Game.handleInput, runs the frame
-// loop, and keeps the HUD text in step with the game.
+// loop, and keeps the toolbar, panels, and tip line in step with the game.
 
 const game = new Game();
 const view = new Renderer(game, document.getElementById('app'));
 const canvas = view.canvas;
 const ordersPanel = new OrdersPanel(game, document.getElementById('orders'));
+const toolbar = new Toolbar(game, document.getElementById('toolbar'));
 const hud = {
   hint: document.getElementById('hint'),
-  roster: document.getElementById('roster'),
-  trains: document.getElementById('trains'),
   status: document.getElementById('status'),
 };
 
@@ -23,7 +23,7 @@ const ROTATE_KEYS = { KeyQ: -1, KeyE: 1 };
 // suppressed.
 const GAME_KEYS = new Set([
   'KeyR', 'KeyV', 'Escape', 'KeyU', 'Space', 'KeyZ', 'KeyO', 'KeyP', 'KeyS',
-  'KeyT', 'KeyX', 'Comma', 'Period', 'BracketLeft', 'BracketRight',
+  'KeyT', 'KeyX', 'Comma', 'Period', 'BracketLeft', 'BracketRight', 'KeyD', 'KeyC',
 ]);
 const held = new Set();
 
@@ -106,24 +106,13 @@ function updateCameraKeys(delta) {
 }
 
 // Patch a text node only when it changed — the HUD is rewritten each frame.
-// `swatch` sets the colour dot drawn before the line (a train's colour).
-function setText(el, text, swatch = null) {
+function setText(el, text) {
   if (el.textContent !== text) el.textContent = text;
   el.hidden = text === '';
-  if (swatch !== null) el.style.setProperty('--swatch', swatch);
 }
 
 function updateHud() {
   setText(hud.hint, game.hintText());
-  setText(hud.roster, game.rosterLine(), TRAIN_COLORS[game.selectedTrain % TRAIN_COLORS.length]);
-  if (game.state === GameState.SIMULATING) {
-    const html = game.trains.map((tr, i) =>
-      `<span style="--swatch:${TRAIN_COLORS[i % TRAIN_COLORS.length]}">Train ${i + 1}: ${tr.passengersOnBoard}/${tr.capacity}</span>`).join('');
-    if (hud.trains.innerHTML !== html) hud.trains.innerHTML = html;
-    hud.trains.hidden = false;
-  } else {
-    hud.trains.hidden = true;
-  }
   setText(hud.status, game.statusTimer > 0 ? game.statusMessage : '');
 }
 
@@ -136,6 +125,7 @@ function frame(now) {
   game.process(delta);
   view.render();
   updateHud();
+  toolbar.update();
   ordersPanel.update();
   requestAnimationFrame(frame);
 }

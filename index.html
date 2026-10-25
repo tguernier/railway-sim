@@ -34,22 +34,87 @@
       pointer-events: none;
       text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
     }
-    #top { top: 12px; display: flex; flex-direction: column; gap: 3px; }
-    #roster, #trains { font-weight: 700; }
-    /* Train colours are dark, so they mark a swatch rather than the text. */
-    #roster::before, #trains span::before {
-      content: '';
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      margin-right: 6px;
-      border-radius: 50%;
-      vertical-align: -1px;
-      background: var(--swatch);
-      box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+    /* Top-left column: the toolbar, then the tool tip and status lines. */
+    #top {
+      position: fixed;
+      top: 12px;
+      left: 16px;
+      max-width: calc(100vw - 32px);
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
     }
-    #trains { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+    #top .panel { position: static; max-width: 100%; }
     #status { color: var(--status); font-weight: 700; }
+
+    /* Toolbar (src/toolbar.js). */
+    #toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 6px 10px;
+      padding: 6px;
+      pointer-events: auto;
+      text-shadow: none;
+    }
+    #toolbar .group { display: flex; gap: 3px; }
+    #toolbar .group + .group { padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, 0.2); }
+    #toolbar button {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1px;
+      min-width: 54px;
+      padding: 4px 6px 3px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--hud-fg);
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #toolbar button svg { width: 20px; height: 20px; }
+    #toolbar button kbd {
+      font: 600 10px/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    #toolbar button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.2); }
+    #toolbar button:focus-visible { outline: 2px solid #ffe94a; outline-offset: 1px; }
+    /* Disabled controls are dimmed by colour, not opacity: a translucent
+       button becomes its own compositing group, and Chrome was seen painting
+       stale neighbouring content into those groups when the toolbar
+       re-rendered. */
+    #toolbar button:disabled {
+      cursor: default;
+      color: rgba(244, 246, 240, 0.32);
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.07);
+    }
+    #toolbar button:disabled kbd { color: rgba(244, 246, 240, 0.25); }
+    #toolbar button[aria-pressed="true"] { background: #ffe94a; border-color: #ffe94a; color: #1d2416; }
+    #toolbar button[aria-pressed="true"] kbd { color: rgba(29, 36, 22, 0.7); }
+    #toolbar button.go:not(:disabled) { background: rgba(80, 200, 90, 0.45); border-color: rgba(120, 230, 130, 0.7); }
+    #toolbar button.halt { background: rgba(255, 90, 79, 0.45); border-color: rgba(255, 130, 120, 0.7); }
+    #toolbar button.danger:hover { background: rgba(255, 90, 79, 0.45); }
+    #toolbar .money {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 0 6px 0 10px;
+      border-left: 1px solid rgba(255, 255, 255, 0.2);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    #toolbar .money b { font-size: 17px; color: var(--hud-fg); }
+    @media (max-width: 699px) {
+      /* Phones: icons and shortcuts only. */
+      #toolbar .label, #toolbar .money .label { display: none; }
+      #toolbar button { min-width: 40px; }
+    }
     #help { bottom: 12px; color: var(--muted); font-size: 12px; }
 
     /* Orders panel (src/orders_panel.js), docked top-right. */
@@ -107,7 +172,12 @@
       cursor: pointer;
     }
     #orders button:hover:not(:disabled), #orders select:hover { background: rgba(255, 255, 255, 0.24); }
-    #orders button:disabled { opacity: 0.35; cursor: default; }
+    #orders button:disabled {
+      cursor: default;
+      color: rgba(244, 246, 240, 0.32);
+      background: rgba(255, 255, 255, 0.04);
+      border-color: rgba(255, 255, 255, 0.08);
+    }
     #orders button:focus-visible, #orders select:focus-visible { outline: 2px solid #ffe94a; outline-offset: 1px; }
     #orders button.title { background: none; border: none; padding: 0; }
     #orders button.icon { padding: 0 6px; min-width: 24px; line-height: 20px; }
@@ -130,6 +200,18 @@
     #orders .problem { margin: 6px 0 0; color: #ffb347; font-size: 12px; font-weight: 600; }
     #orders .status { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
     #orders .status.warn { color: var(--status); font-weight: 700; }
+    #orders .keys { margin: 8px 0 0; font-size: 11px; color: var(--muted); line-height: 1.7; }
+    #orders .keys b { color: var(--hud-fg); }
+    #orders kbd {
+      display: inline-block;
+      min-width: 16px;
+      padding: 0 4px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.14);
+      font: 600 10px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      color: var(--hud-fg);
+      text-align: center;
+    }
     [hidden] { display: none !important; }
   </style>
   <script type="importmap">
@@ -138,11 +220,12 @@
 </head>
 <body>
   <div id="app"></div>
-  <div id="top" class="panel">
-    <div id="hint"></div>
-    <div id="roster"></div>
-    <div id="trains" hidden></div>
-    <div id="status" hidden></div>
+  <div id="top">
+    <nav id="toolbar" class="panel" aria-label="Toolbar"></nav>
+    <div id="tip" class="panel">
+      <div id="hint"></div>
+      <div id="status" hidden></div>
+    </div>
   </div>
   <aside id="orders" aria-label="Trains and orders"></aside>
   <div id="help" class="panel">Camera: wheel to zoom · middle-drag to pan · Shift+middle-drag to orbit · arrow keys pan · Q / E rotate</div>

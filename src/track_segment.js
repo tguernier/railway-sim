@@ -38,6 +38,15 @@ export class TrackSegment {
     // outright — or loose, merely penalized. Kept false wherever meaningless
     // so the flag pair stays canonical.
     this.looseOneWay = false;
+    // Whether this is a double-track taper piece: the stretch where a double
+    // section's two tracks converge on a junction. Taper pieces carry a FOUL
+    // exclusion with their partner (see TrackEditor.createDoubleTrack), so
+    // they are protected from splits, signals, and stations, which would
+    // replace the segment and silently drop that exclusion.
+    this.taper = false;
+    // Whether this is the diagonal of a double-track crossover (see
+    // TrackEditor.placeCrossover). Line-following walks never take it.
+    this.crossover = false;
     this._bounds = null;
     if (waypoints !== null) this._buildCurve(waypoints);
   }

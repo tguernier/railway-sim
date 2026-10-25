@@ -2,6 +2,7 @@ import { Vec2, clamp, degToRad, angleDifference, erase } from './vec2.js';
 import { NetworkNode } from './network_node.js';
 import { TrackSegment } from './track_segment.js';
 import { TrackNetwork } from './track_network.js';
+import { CrossingKind } from './track_crossing.js';
 import { Station } from './station.js';
 import { Platform } from './platform.js';
 
@@ -47,6 +48,45 @@ export class TrackEditor {
   // Minimum segment length that can host a platform.
   static MIN_STATION_SEGMENT_LENGTH = TrackEditor.PLATFORM_LENGTH + 20.0;
 
+  // --- Double track ---
+  // Distance between the centres of a double section's two tracks: clear of
+  // each other's ballast and platforms, and of the 12 px-wide trains.
+  static DOUBLE_SPACING = 24.0;
+  // Length of the taper where the two tracks converge on a section's end
+  // junction: a third of the section, within these bounds. The lower bound
+  // keeps the S-bend of the taper gentler than MIN_CURVE_RADIUS.
+  static DOUBLE_TAPER_MIN = 80.0;
+  static DOUBLE_TAPER_MAX = 120.0;
+  // Shortest centreline that fits both tapers with some parallel track.
+  static DOUBLE_MIN_LENGTH = 2 * TrackEditor.DOUBLE_TAPER_MIN + 40.0;
+  // Target spacing of the one-way signals along the parallel run. Pieces stay
+  // longer than MIN_STATION_SEGMENT_LENGTH so a station fits on one.
+  static DOUBLE_SIGNAL_SPACING = 200.0;
+  // Spacing of the samples each track is drawn through.
+  static DOUBLE_SAMPLE_STEP = 20.0;
+  // How far from the expected offset, and how far off parallel, a track may
+  // be and still count as the other track of a double line (station
+  // placement pairs platforms by geometry).
+  static PARALLEL_TOLERANCE = 5.0;
+  static PARALLEL_ANGLE = degToRad(10.0);
+
+  // --- Crossovers ---
+  // Distance along the line between a crossover's two junctions; the
+  // diagonal's S-bend over it keeps its radius well above MIN_CURVE_RADIUS.
+  static CROSSOVER_LENGTH = 140.0;
+  // Planned splits must keep this far from existing junctions and signals.
+  static NODE_CLEARANCE = 12.0;
+  // How far turnback walks follow a line looking for a platform/crossover.
+  static TURNBACK_SEARCH = 1200.0;
+  // Clear running line a scissors crossover needs beyond each end: room for
+  // the longest train (consists fit a platform) and a margin. A train
+  // waiting on either side of the scissors then never stands in it or in a
+  // neighbouring interlocked area (a double section's end, another
+  // crossover) — waiting in one for the other is how two trains deadlock.
+  static CROSSOVER_CLEARANCE = TrackEditor.PLATFORM_LENGTH + 10.0;
+  // How far a crossover may slide from the click to find a spot that fits.
+  static CROSSOVER_NUDGE = 60.0;
+
   constructor(network) {
     // The track network this editor operates on.
     this.network = network;
@@ -62,6 +102,9 @@ export class TrackEditor {
     this.rejectionReason = '';
     // Human-readable reason the last station/split/delete operation failed.
     this.lastError = '';
+    // Whether drawing lays a double-track section (D toggles) instead of a
+    // single track.
+    this.doubleTrack = false;
   }
 
   // Start drawing a new track from a node.
@@ -92,7 +135,7 @@ export class TrackEditor {
     }
     this.lastFinishRejected = false;
     this.rejectionReason = '';
-    this.createBidirectionalTrack(this.startNode, node, this.waypoints);
+    this._layTrack(this.startNode, node, this.waypoints);
     this.cancel();
     return true;
   }
@@ -107,21 +150,52 @@ export class TrackEditor {
     }
     this.lastFinishRejected = false;
     this.rejectionReason = '';
-    this.createBidirectionalTrack(this.startNode, node, this.waypoints);
+    this._layTrack(this.startNode, node, this.waypoints);
     this.startNode = node;
     this.waypoints = [];
     return true;
   }
 
-  // Validate a candidate track for curve radius, turnout angle and crossings.
-  // Returns "" if valid, or a reason string.
+  // Validate the track a drawing would lay between two nodes. Returns "" if
+  // valid, or a reason string.
   _validateTrack(from, to, wps) {
-    const candidate = new TrackSegment(from, to, wps);
-    if (candidate.minRadiusOfCurvature() < TrackEditor.MIN_CURVE_RADIUS) return 'curve';
-    if (!this._validateTurnoutAngle(from, candidate, true) || !this._validateTurnoutAngle(to, candidate, false)) {
-      return 'turnout';
+    return this._validateCandidates(from, to, wps, null);
+  }
+
+  // The track(s) a drawing from `from` to `to` would lay: one segment, or in
+  // double-track mode both tracks of the section. { tracks } or { reason }.
+  candidateTracks(from, to, wps) {
+    if (!this.doubleTrack) return { tracks: [new TrackSegment(from, to, wps)] };
+    const plan = this.planDoubleTrack(from, to, wps);
+    return plan === null ? { reason: 'double_short' } : { tracks: [plan.right, plan.left] };
+  }
+
+  // Validate every candidate track for curve radius, turnout angle at both
+  // ends, and crossings. `endTangent` is given when finishing onto an
+  // existing track: the track's tangent at the split point, which is what
+  // the new junction's departure angles will be.
+  _validateCandidates(from, to, wps, endTangent) {
+    const candidates = this.candidateTracks(from, to, wps);
+    if (candidates.reason) return candidates.reason;
+    for (const c of candidates.tracks) {
+      if (c.minRadiusOfCurvature() < TrackEditor.MIN_CURVE_RADIUS) return 'curve';
+      if (!this._validateTurnoutAngle(from, c, true)) return 'turnout';
+      const endOk = endTangent === null
+        ? this._validateTurnoutAngle(to, c, false)
+        : TrackEditor.minDivergence([endTangent], c.angleAt(1.0) + Math.PI) <= TrackEditor.MAX_TURNOUT_ANGLE;
+      if (!endOk) return 'turnout';
     }
-    return this.validateCrossings(candidate);
+    for (const c of candidates.tracks) {
+      const reason = this.validateCrossings(c);
+      if (reason !== '') return reason;
+    }
+    return '';
+  }
+
+  // Lay the drawn track between two nodes: single or double per the mode.
+  _layTrack(from, to, wps) {
+    if (this.doubleTrack) this.createDoubleTrack(from, to, wps);
+    else this.createBidirectionalTrack(from, to, wps);
   }
 
   // Check a candidate segment against every track it would cross. Returns ""
@@ -172,25 +246,21 @@ export class TrackEditor {
   // from the new junction. Returns true on success.
   finishOnTrack(hit, continueAfter = false) {
     const [seg, t] = hit;
-    if (seg.isPlatformSegment()) {
-      this.lastError = 'Cannot create junctions inside a station';
+    const blocked = TrackEditor._splitBlocker(seg);
+    if (blocked !== '') {
+      this.lastError = blocked;
       return false;
     }
     this.lastError = '';
     const splitPos = seg.positionAt(t);
-    const candidate = new TrackSegment(this.startNode, NetworkNode.junction(splitPos), this.waypoints);
-    let reason = '';
-    if (candidate.minRadiusOfCurvature() < TrackEditor.MIN_CURVE_RADIUS) {
-      reason = 'curve';
-    } else if (!this._validateTurnoutAngle(this.startNode, candidate, true)) {
-      reason = 'turnout';
-    } else if (TrackEditor.minDivergence([seg.angleAt(t)], candidate.angleAt(1.0) + Math.PI) > TrackEditor.MAX_TURNOUT_ANGLE) {
-      // After the split, the junction's departure angles are the track's
-      // tangent at the split point (both directions).
-      reason = 'turnout';
-    } else {
-      reason = this.validateCrossings(candidate);
-    }
+    const end = NetworkNode.junction(splitPos);
+    const candidate = new TrackSegment(this.startNode, end, this.waypoints);
+    // After the split, the junction's departure angles are the track's
+    // tangent at the split point (both directions). The candidate's own end
+    // node is fresh, so it shares no node with the segment it lands on; the
+    // endpoint clearance in crossingPoints keeps the join out of the
+    // crossing test.
+    const reason = this._validateCandidates(this.startNode, end, this.waypoints, seg.angleAt(t));
     if (reason !== '') {
       this.lastFinishRejected = true;
       this.rejectionReason = reason;
@@ -206,7 +276,7 @@ export class TrackEditor {
     this.lastFinishRejected = false;
     this.rejectionReason = '';
     const junction = this.splitTrackAtHit(hit);
-    this.createBidirectionalTrack(this.startNode, junction, this.waypoints);
+    this._layTrack(this.startNode, junction, this.waypoints);
     if (continueAfter) {
       this.startNode = junction;
       this.waypoints = [];
@@ -259,8 +329,9 @@ export class TrackEditor {
   // new junction node, or null if the segment is a station platform.
   splitTrackAtHit(hit) {
     const [seg, t] = hit;
-    if (seg.isPlatformSegment()) {
-      this.lastError = 'Cannot create junctions inside a station';
+    const blocked = TrackEditor._splitBlocker(seg);
+    if (blocked !== '') {
+      this.lastError = blocked;
       return null;
     }
     this.lastError = '';
@@ -278,6 +349,465 @@ export class TrackEditor {
     second.copySignalFrom(seg);
     if (reverse !== null) first.reverse.copySignalFrom(reverse);
     return junction;
+  }
+
+  // Why a segment may not be split, or '' when it may: platforms (the station
+  // owns them) and double-track tapers (splitting would drop their FOUL
+  // exclusion).
+  static _splitBlocker(seg) {
+    if (seg.isPlatformSegment()) return 'Cannot create junctions inside a station';
+    if (seg.taper) return 'Cannot build where double track converges — choose a spot along the parallel tracks';
+    return '';
+  }
+
+  // --- Double track ---
+
+  // Geometry of a double-track section between two nodes along the drawn
+  // centreline, or null when the centreline is too short to taper in and
+  // out. The two tracks run DOUBLE_SPACING apart and converge onto `from`
+  // and `to` over smoothstep tapers, so the section joins the network at
+  // ordinary junctions. `right` carries from→to traffic (right-hand running
+  // relative to that direction), `left` carries to→from. Returns
+  // { centre, taper, right, left, rightPoints, leftPoints, samples } where
+  // the point arrays are the sampled track waypoints and `samples` their
+  // centreline distances.
+  planDoubleTrack(from, to, wps) {
+    const centre = new TrackSegment(from, to, wps);
+    const length = centre.length();
+    if (length < TrackEditor.DOUBLE_MIN_LENGTH) return null;
+    const taper = clamp(length / 3, TrackEditor.DOUBLE_TAPER_MIN, TrackEditor.DOUBLE_TAPER_MAX);
+    const n = Math.max(2, Math.ceil(length / TrackEditor.DOUBLE_SAMPLE_STEP));
+    const rightPoints = [];
+    const leftPoints = [];
+    const samples = [];
+    for (let k = 1; k < n; k++) {
+      const s = (length * k) / n;
+      const off = TrackEditor.doubleOffset(s, length, taper);
+      const p = centre.positionAt(s / length);
+      // orthogonal() is the left of the direction of travel (y points down).
+      const leftward = Vec2.fromAngle(centre.angleAt(s / length)).orthogonal();
+      rightPoints.push(p.sub(leftward.mul(off)));
+      leftPoints.push(p.add(leftward.mul(off)));
+      samples.push(s);
+    }
+    return {
+      centre,
+      taper,
+      right: new TrackSegment(from, to, rightPoints),
+      left: new TrackSegment(from, to, leftPoints),
+      rightPoints,
+      leftPoints,
+      samples,
+    };
+  }
+
+  // Lateral offset of each track from the centreline at distance s along a
+  // section of the given length: half the spacing along the parallel run,
+  // easing to zero at both ends with a smoothstep (zero slope at the
+  // junction, so the tracks leave it in line with the centreline).
+  static doubleOffset(s, length, taper) {
+    const x = Math.min(s, length - s) / taper;
+    const ease = x >= 1 ? 1 : x * x * (3 - 2 * x);
+    return (TrackEditor.DOUBLE_SPACING / 2) * ease;
+  }
+
+  // Lay a double-track section between two nodes (validate first: see
+  // _validateCandidates). Each track is built as a chain of pieces split at
+  // the taper ends and every ~DOUBLE_SIGNAL_SPACING along the parallel run;
+  // each split carries a strict one-way signal serving that track's
+  // direction, so routing keeps trains on their own running line and
+  // following trains can close up. The taper pieces at each end are marked
+  // `taper` and paired with a FOUL crossing — where the tracks converge,
+  // trains on both would overlap, so only one may hold either taper.
+  // Returns { right, left }: each track's pieces in from→to order.
+  createDoubleTrack(from, to, wps) {
+    const plan = this.planDoubleTrack(from, to, wps);
+    const length = plan.centre.length();
+    const inner = length - 2 * plan.taper;
+    const runs = Math.max(1, Math.round(inner / TrackEditor.DOUBLE_SIGNAL_SPACING));
+    // Split at the samples nearest the taper ends and the evenly spaced
+    // points between them.
+    const cuts = [];
+    for (let i = 0; i <= runs; i++) {
+      const target = plan.taper + (inner * i) / runs;
+      let best = 0;
+      for (let k = 1; k < plan.samples.length; k++) {
+        if (Math.abs(plan.samples[k] - target) < Math.abs(plan.samples[best] - target)) best = k;
+      }
+      if (cuts.length === 0 || best > cuts[cuts.length - 1]) cuts.push(best);
+    }
+    const build = (points) => {
+      const pieces = [];
+      let node = from;
+      let first = 0;
+      for (const cut of cuts) {
+        const junction = NetworkNode.junction(points[cut]);
+        pieces.push(this.createBidirectionalTrack(node, junction, points.slice(first, cut)));
+        node = junction;
+        first = cut + 1;
+      }
+      pieces.push(this.createBidirectionalTrack(node, to, points.slice(first)));
+      return pieces;
+    };
+    const right = build(plan.rightPoints);
+    const left = build(plan.leftPoints);
+    // One-way signals: the right track serves from→to, so the piece arriving
+    // at each split in that direction carries the signal; the left track
+    // serves to→from, so the reverse of the piece leaving each split does.
+    for (let i = 0; i < cuts.length; i++) {
+      right[i].exitSignal = true;
+      left[i + 1].reverse.exitSignal = true;
+    }
+    for (const pieces of [right, left]) {
+      for (const piece of [pieces[0], pieces[pieces.length - 1]]) {
+        piece.taper = true;
+        piece.reverse.taper = true;
+      }
+    }
+    this.network.registerCrossing(right[0], left[0], from.position, 0, CrossingKind.FOUL);
+    this.network.registerCrossing(right[right.length - 1], left[left.length - 1], to.position, 0, CrossingKind.FOUL);
+    return { right, left };
+  }
+
+  // The other track of a double line at a point on `seg`: a different
+  // physical track running parallel DOUBLE_SPACING to either side. Returns
+  // [segment, t] or null.
+  findParallelTrack(seg, t) {
+    const point = seg.positionAt(t);
+    const heading = seg.angleAt(t);
+    const lateral = Vec2.fromAngle(heading).orthogonal();
+    let best = null;
+    let bestDist = TrackEditor.PARALLEL_TOLERANCE;
+    for (const side of [1, -1]) {
+      const probe = point.add(lateral.mul(side * TrackEditor.DOUBLE_SPACING));
+      const seen = new Set([seg, seg.reverse]);
+      for (const other of this.network.segments) {
+        if (seen.has(other)) continue;
+        seen.add(other);
+        if (other.reverse !== null) seen.add(other.reverse);
+        const total = other.length();
+        if (total <= 0) continue;
+        const closest = other.curve.getClosestPoint(probe);
+        const d = closest.distanceTo(probe);
+        if (d >= bestDist) continue;
+        const otherT = other.curve.getClosestOffset(probe) / total;
+        // Parallel in either direction of travel.
+        const diff = Math.abs(angleDifference(heading, other.angleAt(otherT)));
+        if (Math.min(diff, Math.PI - diff) > TrackEditor.PARALLEL_ANGLE) continue;
+        best = [other, otherT];
+        bestDist = d;
+      }
+    }
+    return best;
+  }
+
+  // The directed segment of a double-track line in its running direction,
+  // given a point (seg, t) on it and the other track (partner, [seg, t]):
+  // right-hand running puts the other track on the left of travel.
+  static _runningDirection(seg, t, partner) {
+    const point = seg.positionAt(t);
+    const other = partner[0].positionAt(partner[1]);
+    const left = Vec2.fromAngle(seg.angleAt(t)).orthogonal();
+    return left.dot(other.sub(point)) > 0 ? seg : seg.reverse;
+  }
+
+  // The next segment along the same line after `seg`: the outgoing segment
+  // at its end that continues straight on (never the reverse twin, never a
+  // crossover diagonal). Null at a dead end or a sharp turn.
+  _continueStraight(seg) {
+    let best = null;
+    let bestDiff = TrackEditor.PARALLEL_ANGLE;
+    for (const next of this.network.getOutgoing(seg.nodeEnd)) {
+      if (next === seg.reverse || next.crossover) continue;
+      const diff = Math.abs(angleDifference(seg.angleAt(1.0), next.angleAt(0.0)));
+      if (diff < bestDiff) {
+        best = next;
+        bestDiff = diff;
+      }
+    }
+    return best;
+  }
+
+  // Walk a line from `first` until the first platform and clear the
+  // running-direction signals passed, so trains can run against the line
+  // between a scissors crossover and that platform. Downstream walks (`first`
+  // in the running direction, from a scissors' exit junction) serve trains
+  // that reversed at the platform and run back to the crossover; upstream
+  // walks (`first` against it, from a scissors' entry junction) serve trains
+  // that crossed over and run forward, wrong-way, to the platform. Either
+  // way strict one-way signals on the stretch would bar the move, and a train
+  // waiting at one would deadlock against the wrong-way train (each needing
+  // what the other holds). An upstream walk keeps the signal at its start —
+  // the scissors' protecting signal. Stops at a taper (section end, another
+  // crossover) or after TURNBACK_SEARCH without a platform, clearing
+  // nothing. Returns whether a platform was found.
+  _clearTurnbackSignals(first, upstream = false) {
+    const passed = [];
+    let seg = first;
+    let dist = 0;
+    while (seg !== null && dist < TrackEditor.TURNBACK_SEARCH) {
+      if (seg.isPlatformSegment()) {
+        // Upstream, the running-direction signal at each passed node sits on
+        // the reverse of the segment that left it.
+        const signals = upstream ? passed.slice(1).map((s) => s.reverse) : passed;
+        for (const sig of signals) {
+          sig.exitSignal = false;
+          sig.looseOneWay = false;
+        }
+        return true;
+      }
+      if (seg.taper) return false;
+      passed.push(seg);
+      dist += seg.length();
+      seg = this._continueStraight(seg);
+    }
+    return false;
+  }
+
+  // For a new platform on double track: find the nearest scissors crossover
+  // on its line in each direction (within the section) and clear the
+  // signals between — upstream it is the crossover's exit side (trains
+  // reverse here and run back to it), downstream its entry side (trains
+  // cross over there and run forward to here).
+  _linkTurnbacks(platform) {
+    const partner = this.findParallelTrack(platform.segment, 0.5);
+    if (partner === null) return;
+    const running = TrackEditor._runningDirection(platform.segment, 0.5, partner);
+    for (const upstreamOfPlatform of [true, false]) {
+      let seg = upstreamOfPlatform ? running.reverse : running;
+      let dist = 0;
+      while (seg !== null && dist < TrackEditor.TURNBACK_SEARCH) {
+        const junction = seg.nodeEnd;
+        if (this.network.getOutgoing(junction).some((s) => s.crossover)) {
+          // Re-walk from the crossover towards this platform.
+          this._clearTurnbackSignals(seg.reverse, !upstreamOfPlatform);
+          break;
+        }
+        if (seg.taper) break;
+        dist += seg.length();
+        seg = this._continueStraight(seg);
+      }
+    }
+  }
+
+  // Work out a scissors crossover centred on a click on double track,
+  // without changing anything. Two diagonals cross at a diamond between
+  // junctions CROSSOVER_LENGTH apart on each line:
+  //   trailing — from the left-hand line upstream to the right-hand line
+  //     downstream (relative to the clicked line's running direction f).
+  //     Through traffic cannot take it (it bends backwards through the
+  //     junction); it carries trains that reversed at a stop beyond the
+  //     scissors and run back to it, onto the other line in its direction.
+  //   facing — from the right-hand line upstream to the left-hand line
+  //     downstream. It carries trains forward onto the other line, wrong-way,
+  //     to a platform just beyond, where they reverse and leave correctly —
+  //     so a terminating train can use either platform.
+  // Returns a plan for placeCrossover, or { error }.
+  planCrossover(pos) {
+    const hit = this.findTrackAt(pos);
+    if (hit.length === 0) return { error: 'Click on a double-track section to place a crossover' };
+    const [seg, t] = hit;
+    if (seg.isPlatformSegment()) return { error: 'Crossovers cannot go on a platform' };
+    if (seg.taper) return { error: 'Crossovers need the parallel part of a double-track section' };
+    const partner = this.findParallelTrack(seg, t);
+    if (partner === null) return { error: 'Crossovers go on double track — click one of its two tracks' };
+    const running = TrackEditor._runningDirection(seg, t, partner);
+    const clicked = seg.positionAt(t);
+    const other = partner[0].positionAt(partner[1]);
+    // Frame: f along the clicked line's running direction, n from the other
+    // line (the left-hand one relative to f) towards the clicked one.
+    const f = Vec2.fromAngle(running === seg ? seg.angleAt(t) : seg.angleAt(t) + Math.PI);
+    const n = clicked.sub(other).normalized();
+    const clickCentre = clicked.add(other).mul(0.5);
+    // One click should just work: signals sit every ~200 px, so slide the
+    // crossover up to CROSSOVER_NUDGE along the line to the nearest spot
+    // where it fits, reporting the reason at the click itself if none does.
+    let firstError = null;
+    for (let i = 0; i <= 2 * TrackEditor.CROSSOVER_NUDGE / 10; i++) {
+      const shift = (i % 2 === 1 ? 1 : -1) * Math.ceil(i / 2) * 10;
+      const plan = this._planCrossoverAt(clickCentre.add(f.mul(shift)), f, n);
+      if (plan.error === undefined) return plan;
+      if (firstError === null) firstError = plan;
+    }
+    return firstError;
+  }
+
+  // planCrossover for a given centre point and frame.
+  _planCrossoverAt(centre, f, n) {
+    const half = TrackEditor.CROSSOVER_LENGTH / 2;
+    const offset = TrackEditor.DOUBLE_SPACING / 2;
+    const at = (along, side) => centre.add(f.mul(along)).add(n.mul(side * offset));
+    // R = the right-hand line (runs along f), L = the left-hand one.
+    const points = { rIn: at(-half, 1), rOut: at(half, 1), lIn: at(half, -1), lOut: at(-half, -1) };
+    const snapped = {};
+    for (const [key, target] of Object.entries(points)) {
+      const found = this._snapToLine(target, f);
+      if (found.error) return found;
+      snapped[key] = found;
+    }
+    // Both junctions on a line must split the same piece: no junction or
+    // signal between them.
+    if (snapped.rIn.seg !== snapped.rOut.seg || snapped.lIn.seg !== snapped.lOut.seg) {
+      return { error: 'Too close to a junction or signal — place the crossover a little further along' };
+    }
+    for (const [a, b] of [[snapped.rIn, snapped.rOut], [snapped.lIn, snapped.lOut]]) {
+      if (!this._clearAround(a.seg, Math.min(a.t, b.t), Math.max(a.t, b.t), TrackEditor.CROSSOVER_CLEARANCE)) {
+        return { error: 'Too close to where the double track ends or another crossover — a train must fit between them' };
+      }
+    }
+    // Each diagonal is a smoothstep S-bend from one line to the other.
+    const bend = (fromSide) => {
+      const wps = [];
+      const steps = 7;
+      for (let k = 1; k < steps; k++) {
+        const u = k / steps;
+        const ease = u * u * (3 - 2 * u);
+        wps.push(centre.add(f.mul(-half + 2 * half * u)).add(n.mul(fromSide * offset * (1 - 2 * ease))));
+      }
+      return wps;
+    };
+    const diagonals = [
+      { from: snapped.lOut, to: snapped.rOut, wps: bend(-1) },  // trailing
+      { from: snapped.rIn, to: snapped.lIn, wps: bend(1) },     // facing
+    ];
+    for (const d of diagonals) {
+      d.segment = new TrackSegment(NetworkNode.junction(d.from.point), NetworkNode.junction(d.to.point), d.wps);
+      if (d.segment.minRadiusOfCurvature() < TrackEditor.MIN_CURVE_RADIUS) {
+        return { error: 'Track too curved for a crossover here' };
+      }
+      for (const [track, angle] of [[d.from, d.segment.angleAt(0.0)], [d.to, d.segment.angleAt(1.0) + Math.PI]]) {
+        if (TrackEditor.minDivergence([track.seg.angleAt(track.t)], angle) > TrackEditor.MAX_TURNOUT_ANGLE) {
+          return { error: 'Track too curved for a crossover here' };
+        }
+      }
+      if (this.validateCrossings(d.segment) !== '') return { error: 'A crossover cannot cross other track' };
+    }
+    return { snapped, diagonals };
+  }
+
+  // Whether the line through `seg` runs at least `dist` beyond the span
+  // [t0, t1] on it, both ways, without meeting a taper (an interlocked
+  // area). A dead end is fine.
+  _clearAround(seg, t0, t1, dist) {
+    const total = seg.length();
+    for (const [start, covered] of [[seg, (1 - t1) * total], [seg.reverse, t0 * total]]) {
+      let current = start;
+      let reach = covered;
+      while (reach < dist) {
+        const next = this._continueStraight(current);
+        if (next === null) break;
+        if (next.taper) return false;
+        reach += next.length();
+        current = next;
+      }
+    }
+    return true;
+  }
+
+  // The point on a running line nearest `target`, checked usable for a
+  // crossover split: on parallel (to f), plain track — not a platform or
+  // taper — and clear of existing nodes. Returns { seg, t, point } or
+  // { error }.
+  _snapToLine(target, f) {
+    const hit = this.findTrackAt(target);
+    if (hit.length === 0) return { error: 'Track too curved for a crossover here' };
+    const [seg] = hit;
+    const total = seg.length();
+    const t = seg.curve.getClosestOffset(target) / total;
+    const point = seg.positionAt(t);
+    if (point.distanceTo(target) > TrackEditor.PARALLEL_TOLERANCE) return { error: 'Track too curved for a crossover here' };
+    const diff = Math.abs(angleDifference(seg.angleAt(t), f.angle()));
+    if (Math.min(diff, Math.PI - diff) > TrackEditor.PARALLEL_ANGLE) return { error: 'Track too curved for a crossover here' };
+    if (seg.isPlatformSegment()) return { error: 'Crossovers cannot overlap a platform' };
+    if (seg.taper) return { error: 'Too close to where the double track ends or another crossover' };
+    if (point.distanceTo(seg.nodeStart.position) < TrackEditor.NODE_CLEARANCE
+        || point.distanceTo(seg.nodeEnd.position) < TrackEditor.NODE_CLEARANCE) {
+      return { error: 'Too close to a junction or signal — place the crossover a little further along' };
+    }
+    return { seg, t, point };
+  }
+
+  // Place a scissors crossover centred on a click on double track (see
+  // planCrossover). Splits each line at its entry and exit junctions and
+  // lays both diagonals; they cross at a diamond, which TrackNetwork detects
+  // like any flat crossing. Interlocking:
+  //   - each line's middle piece (entry → exit junction) is a taper paired
+  //     by FOUL crossings with both diagonals, which run alongside it where
+  //     they leave the line — so straight-through trains on the two lines
+  //     can pass each other, but no diagonal move overlaps either;
+  //   - a protecting signal (loose one-way, the line's direction) on the
+  //     piece arriving at each line's entry junction: the last waiting point
+  //     before the scissors, clear of everything a diagonal touches.
+  // Then clears the wrong-way stretches to the nearest platform beyond each
+  // end (_clearTurnbackSignals). Returns true; lastError explains a false.
+  placeCrossover(pos) {
+    const plan = this.planCrossover(pos);
+    if (plan.error !== undefined) {
+      this.lastError = plan.error;
+      return false;
+    }
+    const split = (point) => {
+      const [seg] = this.findTrackAt(point);
+      return this.splitTrackAtHit([seg, seg.curve.getClosestOffset(point) / seg.length()]);
+    };
+    const { snapped } = plan;
+    const node = {};
+    for (const key of ['rIn', 'rOut', 'lIn', 'lOut']) node[key] = split(snapped[key].point);
+    const diagonals = [
+      this.createBidirectionalTrack(node.lOut, node.rOut, plan.diagonals[0].wps),
+      this.createBidirectionalTrack(node.rIn, node.lIn, plan.diagonals[1].wps),
+    ];
+    // Each line's middle piece, in its running direction (entry → exit).
+    const middles = [];
+    for (const [entry, exit] of [[node.rIn, node.rOut], [node.lIn, node.lOut]]) {
+      const middle = this.network.getOutgoing(entry).find((s) => s.nodeEnd === exit && !s.crossover);
+      const approach = this.network.getIncoming(entry).find((s) => s !== middle.reverse && !s.crossover);
+      // The protecting signal: a loose one-way. It is the line's waiting
+      // point, but must not bar the wrong-way move out of the entry junction
+      // that a train makes after crossing the facing diagonal (a strict
+      // one-way bars routing at its junction); loose only prices it, so a
+      // train crosses over only when the platform straight ahead is worse.
+      approach.exitSignal = true;
+      approach.looseOneWay = true;
+      middles.push(middle);
+    }
+    for (const piece of [...diagonals, ...middles]) {
+      piece.taper = true;
+      piece.reverse.taper = true;
+    }
+    for (const diagonal of diagonals) {
+      diagonal.crossover = true;
+      diagonal.reverse.crossover = true;
+      for (const middle of middles) {
+        this.network.registerCrossing(middle, diagonal, diagonal.positionAt(0.5), 0, CrossingKind.FOUL);
+      }
+    }
+    // No waiting point within CROSSOVER_CLEARANCE past either exit: a train
+    // that has crossed stops only with its tail clear of the scissors.
+    for (const [exitNode, middle] of [[node.rOut, middles[0]], [node.lOut, middles[1]]]) {
+      let seg = this.network.getOutgoing(exitNode).find((s) => s !== middle.reverse && !s.crossover);
+      let reach = 0;
+      while (seg !== null && seg !== undefined && !seg.taper) {
+        reach += seg.length();
+        if (reach >= TrackEditor.CROSSOVER_CLEARANCE) break;
+        seg.exitSignal = false;
+        seg.looseOneWay = false;
+        seg = this._continueStraight(seg);
+      }
+    }
+    // Wrong-way stretches: from each exit junction downstream (reversing
+    // trains run back), and from each entry junction upstream (crossing
+    // trains run forward) — keeping the protecting signal.
+    for (const [exitNode, middle] of [[node.rOut, middles[0]], [node.lOut, middles[1]]]) {
+      const downstream = this.network.getOutgoing(exitNode).find((s) => s !== middle.reverse && !s.crossover);
+      if (downstream !== undefined) this._clearTurnbackSignals(downstream);
+    }
+    for (const [entryNode, middle] of [[node.rIn, middles[0]], [node.lIn, middles[1]]]) {
+      const upstream = this.network.getOutgoing(entryNode).find((s) => s !== middle && !s.crossover);
+      if (upstream !== undefined) this._clearTurnbackSignals(upstream, true);
+    }
+    this.lastError = '';
+    return true;
   }
 
   // Try to delete the track at a position. Platform segments are protected —
@@ -330,8 +860,11 @@ export class TrackEditor {
 
   // Build a station on the track at a position, inside a town's radius.
   // Splits the hit segment into approach tracks and a platform segment with
-  // entry/exit junctions. Returns the new Station, or null (with lastError
-  // set) if placement is invalid.
+  // entry/exit junctions. On double track — another track running parallel
+  // DOUBLE_SPACING away — the station gets a platform on each track, side
+  // platforms facing outward, so trains in both directions can call; both
+  // are validated before either is built. Returns the new Station, or null
+  // (with lastError set) if placement is invalid.
   placeStation(pos, towns) {
     const hit = this.findTrackAt(pos);
     if (hit.length === 0) {
@@ -339,11 +872,6 @@ export class TrackEditor {
       return null;
     }
     const [seg, t] = hit;
-    if (seg.isPlatformSegment()) {
-      this.lastError = 'There is already a platform here';
-      return null;
-    }
-
     const point = seg.positionAt(t);
     let town = null;
     let bestDist = Infinity;
@@ -354,6 +882,10 @@ export class TrackEditor {
         town = candidate;
       }
     }
+    if (seg.isPlatformSegment()) {
+      this.lastError = 'There is already a platform here';
+      return null;
+    }
     if (town === null) {
       this.lastError = "Stations must be placed inside a town's circle";
       return null;
@@ -363,11 +895,45 @@ export class TrackEditor {
       return null;
     }
 
-    const total = seg.length();
-    if (total < TrackEditor.MIN_STATION_SEGMENT_LENGTH) {
-      this.lastError = 'Track too short for a platform';
+    const plans = [this._planPlatform(seg, t)];
+    const partner = this.findParallelTrack(seg, t);
+    if (partner !== null) plans.push(this._planPlatform(partner[0], partner[1]));
+    const failed = plans.find((plan) => plan.error !== undefined);
+    if (failed !== undefined) {
+      this.lastError = plans.length > 1 && failed === plans[1]
+        ? `The other track of the double line can't take a platform here: ${failed.error.toLowerCase()}`
+        : failed.error;
       return null;
     }
+
+    const station = new Station(town);
+    // A lone platform faces the town; a pair faces outward, away from each
+    // other's track.
+    const facing = plans.map((plan, i) => (plans.length === 1
+      ? town.position
+      : plan.mid.mul(2).sub(plans[1 - i].mid)));
+    plans.forEach((plan, i) => {
+      const platform = this._buildPlatform(plan, facing[i]);
+      platform.station = station;
+      station.platforms.push(platform);
+    });
+    // A scissors crossover already on either line, either side, now has a
+    // platform to serve: clear the wrong-way stretch between them.
+    if (station.platforms.length === 2) {
+      for (const platform of station.platforms) this._linkTurnbacks(platform);
+    }
+    town.station = station;
+    this.lastError = '';
+    return station;
+  }
+
+  // Work out a platform span on a segment centred on t, without changing
+  // anything. Returns a plan for _buildPlatform, or { error }.
+  _planPlatform(seg, t) {
+    if (seg.isPlatformSegment()) return { error: 'There is already a platform here' };
+    if (seg.taper) return { error: 'Stations cannot go where double track converges' };
+    const total = seg.length();
+    if (total < TrackEditor.MIN_STATION_SEGMENT_LENGTH) return { error: 'Track too short for a platform' };
 
     // Centre the platform span on the click, shifted to fit within the segment.
     const startOff = clamp(t * total - TrackEditor.PLATFORM_HALF_LENGTH, 0, total - TrackEditor.PLATFORM_LENGTH);
@@ -384,17 +950,16 @@ export class TrackEditor {
     const exit = snapEnd ? seg.nodeEnd : NetworkNode.junction(seg.positionAt(tEnd));
     const platformWps = this._sampleCurveWaypoints(seg, tStart, tEnd);
     const platformSeg = new TrackSegment(entry, exit, platformWps);
-    if (platformSeg.minRadiusOfCurvature() < TrackEditor.MIN_CURVE_RADIUS) {
-      this.lastError = 'Track too curved for a platform';
-      return null;
-    }
+    if (platformSeg.minRadiusOfCurvature() < TrackEditor.MIN_CURVE_RADIUS) return { error: 'Track too curved for a platform' };
     // The mirror of the "no crossings over a platform" drawing rule.
-    if (this._spanContainsCrossing(seg, tStart, tEnd)) {
-      this.lastError = 'Cannot build a platform across a track crossing';
-      return null;
-    }
+    if (this._spanContainsCrossing(seg, tStart, tEnd)) return { error: 'Cannot build a platform across a track crossing' };
+    return { seg, tStart, tEnd, snapStart, snapEnd, entry, exit, platformWps, platformSeg, mid: platformSeg.positionAt(0.5) };
+  }
 
-    // Replace the hit segment with approach tracks + the platform pair.
+  // Replace a planned segment with approach tracks + the platform pair, the
+  // platform drawn on the side facing `toward`. Returns the Platform.
+  _buildPlatform(plan, toward) {
+    const { seg, tStart, tEnd, snapStart, snapEnd, entry, exit, platformWps, platformSeg } = plan;
     const reverse = seg.reverse;
     this.network.removeSegment(seg);
     if (reverse !== null) this.network.removeSegment(reverse);
@@ -414,20 +979,12 @@ export class TrackEditor {
     this.network.addSegment(platformSeg);
     this.network.addSegment(platformRev);
 
-    // Draw the platform on the side of the track facing the town.
-    const mid = platformSeg.positionAt(0.5);
     const perp = Vec2.fromAngle(platformSeg.angleAt(0.5)).orthogonal();
-    const side = perp.dot(town.position.sub(mid)) >= 0 ? 1.0 : -1.0;
-
-    const station = new Station(town);
+    const side = perp.dot(toward.sub(plan.mid)) >= 0 ? 1.0 : -1.0;
     const platform = new Platform(platformSeg, platformRev, side);
-    platform.station = station;
-    station.platforms.push(platform);
     platformSeg.platform = platform;
     platformRev.platform = platform;
-    town.station = station;
-    this.lastError = '';
-    return station;
+    return platform;
   }
 
   // --- Signals ---

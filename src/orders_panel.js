@@ -56,13 +56,10 @@ export class OrdersPanel {
       case 'remove': g.removeOrder(ti, oi); break;
       case 'clear': g.clearOrders(ti); break;
       case 'pick': {
-        // Toggle map picking for this train (the O orders mode).
+        // Toggle map picking for this train (the O orders tool).
         const picking = g.editingOrders && g.selectedTrain === ti;
         g.selectTrain(ti);
-        g.placingStation = false;
-        g.placingSignal = false;
-        if (g.editor.drawing) g.editor.cancel();
-        g.editingOrders = !picking;
+        g.setTool(picking ? (g.editor.doubleTrack ? 'double' : 'track') : 'orders');
         break;
       }
     }
@@ -130,7 +127,11 @@ export class OrdersPanel {
     const buy = editing
       ? `<button class="wide" data-action="buy">+ Buy train <span class="meta">(${Game.TRAIN_COST})</span></button>`
       : '';
-    return `${head}<div class="cards">${cards}</div>${buy}`;
+    // The keyboard edits the selected train; say which, and how.
+    const keys = editing
+      ? `<p class="keys">Keys edit <b>Train ${g.selectedTrain + 1}</b>: <kbd>,</kbd> <kbd>.</kbd> select · <kbd>[</kbd> <kbd>]</kbd> cars · <kbd>O</kbd> pick stops · <kbd>T</kbd> buy · <kbd>X</kbd> sell</p>`
+      : '';
+    return `${head}<div class="cards">${cards}</div>${buy}${keys}`;
   }
 
   // One stop in a card. `tag` marks the stop a running train is at

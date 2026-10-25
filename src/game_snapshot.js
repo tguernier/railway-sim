@@ -47,6 +47,8 @@ export class GameSnapshot {
     for (const seg of net.segments) {
       const clone = TrackSegment.fromCurve(nodeMap.get(seg.nodeStart), nodeMap.get(seg.nodeEnd), seg.curve);
       clone.copySignalFrom(seg);
+      clone.taper = seg.taper;
+      clone.crossover = seg.crossover;
       segmentMap.set(seg, clone);
     }
     for (const seg of net.segments) {
@@ -65,7 +67,7 @@ export class GameSnapshot {
       const a = crossing.trackA;
       const b = crossing.trackB;
       if (a === null || b === null || !segmentMap.has(a) || !segmentMap.has(b)) continue;
-      snap.network.registerCrossing(segmentMap.get(a), segmentMap.get(b), crossing.position, crossing.angle);
+      snap.network.registerCrossing(segmentMap.get(a), segmentMap.get(b), crossing.position, crossing.angle, crossing.kind);
     }
 
     // Towns, with stations/platforms rewired onto the cloned segments.

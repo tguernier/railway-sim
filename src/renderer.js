@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { Vec2, TAU, radToDeg } from './vec2.js';
-import { GameState, TRAIN_COLORS } from './game.js';
+import { GameState, TRAIN_COLORS, TOWN_PALETTE } from './game.js';
 import { TrackEditor } from './track_editor.js';
 import { OneWay } from './track_network.js';
+import { CrossingKind } from './track_crossing.js';
 import { Train } from './train.js';
 import { circumradius } from './track_segment.js';
 
@@ -522,6 +523,9 @@ export class Renderer {
   // recoloured per frame with the holder's colour under the V overlay.
   _buildCrossings(net) {
     for (const crossing of net.crossings) {
+      // Double-track taper pairs are exclusion only; the converging tracks
+      // already show where they are.
+      if (crossing.kind !== CrossingKind.DIAMOND) continue;
       const material = new THREE.MeshBasicMaterial({ color: COLORS.crossing });
       const marker = new THREE.Mesh(GEO.diamondRing, material);
       marker.scale.set(8, 8, 8);
@@ -696,7 +700,8 @@ export class Renderer {
       if ((g.editingOrders || g.placingStation) && g.hoveredTown !== null) {
         this._ring(g.hoveredTown.position, g.hoveredTown.radius + 4, '#ffff00', Y.townDisc + 0.3, 12);
       }
-      if (!g.editingOrders && !g.placingStation) {
+      // Junction hover rings where junctions are what a click acts on.
+      if (['track', 'double', 'signal'].includes(g.tool)) {
         const hr = 13;
         const hj = g.hoveredJunction;
         if (hj !== null && g.network.nodes.includes(hj)) {
@@ -707,11 +712,47 @@ export class Renderer {
       }
       if (g.editingOrders) this._orderPreview();
       else if (!g.placingStation && !g.placingSignal && ed.drawing && g.mousePos !== null) this._curvaturePreview();
+      if (g.placingTown && g.mousePos !== null) this._townGhost(g.mousePos);
+      if (g.placingCrossover && g.mousePos !== null) this._crossoverGhost(g.mousePos);
+      if (g.deleting && g.mousePos !== null) this._deleteTarget(g.mousePos);
     }
   }
 
-  // The track being drawn, coloured by curvature (green OK, red too tight),
-  // plus its waypoints.
+  // Town tool: the catchment the next town would get, in its colour.
+  _townGhost(pos) {
+    const color = TOWN_PALETTE[this.game.nextColorIndex % TOWN_PALETTE.length];
+    const disc = this._overlayMesh(new THREE.CircleGeometry(60, 48).rotateX(-Math.PI / 2), this.mat('basic', color, 0.18));
+    disc.position.set(pos.x, Y.townDisc + 0.2, pos.y);
+    this._ring(pos, 60, color, Y.townDisc + 0.3, 8);
+  }
+
+  // Crossover tool: the scissors a click would lay, where one fits.
+  _crossoverGhost(pos) {
+    const plan = this.game.editor.planCrossover(pos);
+    if (plan.error !== undefined) return;
+    const b = new StripBuilder();
+    for (const d of plan.diagonals) b.ribbon(d.segment.getBakedPoints(), -3, 3, Y.overlay);
+    this._overlayMesh(b.build(), this.mat('basic', '#4dff4d', 0.8));
+  }
+
+  // Delete tool: what a click would remove — the track under the cursor
+  // (which wins, as in Game._rightClickAt), else the town.
+  _deleteTarget(pos) {
+    const g = this.game;
+    const hit = g.editor.findTrackAt(pos);
+    if (hit.length > 0) {
+      const color = hit[0].isPlatformSegment() ? '#ffb347' : '#ff3b30';
+      const b = new StripBuilder().ribbon(hit[0].getBakedPoints(), -7, 7, Y.railTop + 0.4);
+      this._overlayMesh(b.build(), this.mat('basic', color, 0.6));
+    } else if (g.hoveredTown !== null) {
+      this._ring(g.hoveredTown.position, g.hoveredTown.radius + 4, '#ff3b30', Y.townDisc + 0.3, 12);
+    }
+  }
+
+  // The track being drawn — or, in double-track mode, both tracks of the
+  // section — coloured by curvature (green OK, red too tight), plus its
+  // waypoints. A double section too short to split and merge previews as
+  // its dashed centreline.
   _curvaturePreview() {
     const g = this.game;
     const ed = g.editor;
@@ -720,7 +761,19 @@ export class Renderer {
       m.scale.setScalar(5);
       m.position.set(wp.x, Y.overlay, wp.y);
     }
-    const preview = ed.buildPreviewSegment(g.mousePos);
+    const centre = ed.buildPreviewSegment(g.mousePos);
+    const candidates = ed.candidateTracks(ed.startNode, centre.nodeEnd, ed.waypoints);
+    if (candidates.reason !== undefined) {
+      const b = new StripBuilder();
+      for (const piece of dashPieces(centre.getBakedPoints(), 8)) b.ribbon(piece, -1.5, 1.5, Y.overlay);
+      if (b.pos.length > 0) this._overlayMesh(b.build(), this.mat('basic', '#ffb347', 0.8));
+      return;
+    }
+    for (const preview of candidates.tracks) this._curvatureRibbon(preview);
+  }
+
+  // One previewed track, each baked piece coloured by local curvature.
+  _curvatureRibbon(preview) {
     const points = preview.getBakedPoints();
     if (points.length < 3) {
       const b = new StripBuilder();

@@ -56,10 +56,11 @@ export class Train {
     this.blockedTime = 0.0;
     // Whether the previous move() ended waiting for track.
     this._wasWaiting = false;
-    // The network the train routes on and the platform its current leg
-    // targets, set at dispatch — what tryExtendReservation re-paths against.
+    // The network the train routes on and the platforms of the station its
+    // current leg targets (a station on double track has one per track), set
+    // at dispatch — what tryExtendReservation re-paths against.
     this.network = null;
-    this.targetPlatform = null;
+    this.targetPlatforms = [];
     // The train whose reservation blocked this train's last failed reserve
     // attempt — the edge of the wait-for graph used for deadlock detection.
     this.blockedBy = null;
@@ -67,6 +68,15 @@ export class Train {
     this.orders = [];
     // Index into orders for the next stop the train is heading toward.
     this.currentOrderIndex = 0;
+  }
+
+  // Single-platform view of targetPlatforms, for callers that target one
+  // platform specifically.
+  get targetPlatform() {
+    return this.targetPlatforms[0] ?? null;
+  }
+  set targetPlatform(platform) {
+    this.targetPlatforms = platform === null ? [] : [platform];
   }
 
   // Maximum number of passengers the train can carry (all cars combined).
@@ -322,15 +332,15 @@ export class Train {
     return true;
   }
 
-  // Re-path the provisional tail (route[limitIndex + 1:]) to targetPlatform
-  // with other trains' reservations penalized, and splice a better tail onto
+  // Re-path the provisional tail (route[limitIndex + 1:]) to the cheapest of
+  // targetPlatforms with other trains' reservations penalized, and splice a better tail onto
   // the kept prefix — history, indices, and held reservations stay intact.
   // Hysteresis: a free tail is only abandoned for one cheaper by
   // SWITCH_MARGIN; a blocked tail for any cheaper one. Skipped while the
   // train is still anchored at its departure platform. Blocked retries are
   // throttled to one attempt per REROUTE_RETRY_INTERVAL.
   _repathProvisionalTail() {
-    if (this.network === null || this.targetPlatform === null) return;
+    if (this.network === null || this.targetPlatforms.length === 0) return;
     if (this.limitIndex < this.routeIndex) return; // anchored at the departure platform
     if (this._wasWaiting && this.blockedTime < Train.REROUTE_RETRY_INTERVAL) return;
     this.blockedTime = 0.0;
@@ -338,8 +348,9 @@ export class Train {
     const oldTail = this.route.slice(this.limitIndex + 1);
     // The tail must continue the rolling train's heading (no reversal: only
     // a train standing at a stop may change direction).
-    const newTail = this.network.findRouteToPlatform(node, this.targetPlatform, this, this.route[this.limitIndex]);
-    if (newTail.length === 0) return;
+    const found = this.network.findRouteToStation(node, this.targetPlatforms, this, this.route[this.limitIndex]);
+    if (found === null) return;
+    const newTail = found.route;
     const oldCost = this.network.routeCost(oldTail, this);
     const newCost = this.network.routeCost(newTail, this);
     const oldBlocked = oldTail.some((seg) => this.isBlocked(seg));

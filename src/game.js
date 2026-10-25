@@ -86,10 +86,14 @@ export class Game {
     this.hoveredJunction = null;
     // Current mouse position in world coordinates (Vec2), or null.
     this.mousePos = null;
-    // Edit sub-modes.
+    // Edit sub-modes (at most one is set; none means the track tool). See
+    // `tool` / setTool.
     this.editingOrders = false;
     this.placingStation = false;
     this.placingSignal = false;
+    this.placingTown = false;
+    this.placingCrossover = false;
+    this.deleting = false;
     // Trains flagged as deadlocked by the last check.
     this.deadlockedTrains = [];
     this._deadlockTimer = 0.0;
@@ -207,6 +211,9 @@ export class Game {
     if (this.editingOrders) return this._handleOrderInput(event);
     if (this.placingStation) return this._handleStationInput(event);
     if (this.placingSignal) return this._handleSignalInput(event);
+    if (this.placingTown) return this._handleTownInput(event);
+    if (this.placingCrossover) return this._handleCrossoverInput(event);
+    if (this.deleting) return this._handleDeleteInput(event);
 
     if (event.type === 'mouse') {
       if (event.button === 'left') {
@@ -223,9 +230,13 @@ export class Game {
         case 'Escape': if (drawing) this.editor.cancel(); break;
         case 'Space': this._startSimulation(); break;
         case 'KeyZ': this.editor.undoWaypoint(); break;
+        // Toggle double-track drawing (also mid-drawing: it changes what the
+        // finish click lays). A mode, not an edit — no undo step.
+        case 'KeyD': this.editor.doubleTrack = !this.editor.doubleTrack; break;
         case 'KeyO': if (!drawing) this.editingOrders = true; break;
         case 'KeyP': if (!drawing) this.placingStation = true; break;
         case 'KeyS': if (!drawing) this.placingSignal = true; break;
+        case 'KeyC': if (!drawing) this.placingCrossover = true; break;
         case 'KeyT': if (!drawing) this._buyTrain(); break;
         case 'KeyX': if (!drawing) this._sellTrain(); break;
         case 'Comma': this._selectTrain(-1); break;
@@ -302,6 +313,8 @@ export class Game {
         return `Crosses another track too shallowly (min ${Math.round(radToDeg(TrackEditor.MIN_CROSSING_ANGLE))}°) — cross it more squarely`;
       case 'crossing_platform':
         return 'Tracks cannot cross a station platform';
+      case 'double_short':
+        return `Double track needs a longer run (at least ${TrackEditor.DOUBLE_MIN_LENGTH} px) to split and merge — draw further, or press D for single track`;
       default:
         return 'Curve too tight — add waypoints for a gentler bend';
     }
@@ -386,6 +399,118 @@ export class Game {
     if (event.type === 'key' && (event.code === 'Escape' || event.code === 'KeyS')) {
       this.placingSignal = false;
     }
+  }
+
+  // Handles inputs while placing towns (the toolbar's Town tool; Shift+click
+  // with the track tool does the same).
+  _handleTownInput(event) {
+    if (event.type === 'mouse') {
+      if (event.button === 'left') this._placeTown(event.pos);
+      else if (event.button === 'right') this.placingTown = false;
+    }
+    if (event.type === 'key' && event.code === 'Escape') this.placingTown = false;
+  }
+
+  // Handles inputs while placing crossovers on double track. The mode stays
+  // active so several can be placed in a row.
+  _handleCrossoverInput(event) {
+    if (event.type === 'mouse') {
+      if (event.button === 'left') this._tryPlaceCrossover(event.pos);
+      else if (event.button === 'right') this.placingCrossover = false;
+    }
+    if (event.type === 'key' && (event.code === 'Escape' || event.code === 'KeyC')) {
+      this.placingCrossover = false;
+    }
+  }
+
+  // Place a crossover at a position, as one undo step if it succeeds.
+  _tryPlaceCrossover(pos) {
+    this._pushUndo();
+    if (!this.editor.placeCrossover(pos)) {
+      this._discardUndo();
+      this._showStatus(this.editor.lastError);
+    }
+  }
+
+  // Handles inputs while deleting (the toolbar's Delete tool; right-click
+  // with the track tool does the same).
+  _handleDeleteInput(event) {
+    if (event.type === 'mouse') {
+      if (event.button === 'left') this._rightClickAt(event.pos);
+      else if (event.button === 'right') this.deleting = false;
+    }
+    if (event.type === 'key' && event.code === 'Escape') this.deleting = false;
+  }
+
+  // --- Tools (the toolbar) ---
+
+  // The active editing tool: 'track' or 'double' (no sub-mode; which one
+  // follows TrackEditor.doubleTrack), 'town', 'station', 'signal',
+  // 'crossover', 'delete', or 'orders' (picking stops on the map). Null
+  // while simulating.
+  get tool() {
+    if (this.state !== GameState.EDITING) return null;
+    if (this.editingOrders) return 'orders';
+    if (this.placingStation) return 'station';
+    if (this.placingSignal) return 'signal';
+    if (this.placingTown) return 'town';
+    if (this.placingCrossover) return 'crossover';
+    if (this.deleting) return 'delete';
+    return this.editor.doubleTrack ? 'double' : 'track';
+  }
+
+  // Switch editing tool. Any track being drawn is cancelled, except when
+  // switching between single and double track, which (like D) changes what
+  // the drawing's finish click lays.
+  setTool(tool) {
+    if (this.state !== GameState.EDITING) return;
+    const trackTools = ['track', 'double'];
+    if (this.editor.drawing && !trackTools.includes(tool)) this.editor.cancel();
+    this._clearModes();
+    switch (tool) {
+      case 'track': this.editor.doubleTrack = false; break;
+      case 'double': this.editor.doubleTrack = true; break;
+      case 'town': this.placingTown = true; break;
+      case 'station': this.placingStation = true; break;
+      case 'signal': this.placingSignal = true; break;
+      case 'crossover': this.placingCrossover = true; break;
+      case 'delete': this.deleting = true; break;
+      case 'orders': this.editingOrders = true; break;
+    }
+    // Cancelling a drawing can drop a fresh start junction from the world.
+    this.worldVersion++;
+  }
+
+  _clearModes() {
+    this.editingOrders = false;
+    this.placingStation = false;
+    this.placingSignal = false;
+    this.placingTown = false;
+    this.placingCrossover = false;
+    this.deleting = false;
+  }
+
+  // Toolbar commands — the same actions as their keys (U, Space, Esc, R, V).
+  undo() {
+    if (this.state === GameState.EDITING && !this.editor.drawing) this._undo();
+    this.worldVersion++;
+  }
+
+  startSimulation() {
+    if (this.state !== GameState.EDITING) return;
+    if (this.editor.drawing) this.editor.cancel();
+    this._startSimulation();
+    this.worldVersion++;
+  }
+
+  stopSimulation() {
+    if (this.state === GameState.SIMULATING) {
+      this._stopSimulation('Simulation stopped — back to editing (fleet cost refunded)');
+    }
+  }
+
+  toggleReservations() {
+    this.showReservations = !this.showReservations;
   }
 
   // Place or cycle a signal at a position, as one undo step if it succeeds.
@@ -599,6 +724,9 @@ export class Game {
   _startSimulation() {
     if (this.network.segments.length === 0) return;
     const firstStops = new Map();
+    // Where each train spawns: the first-stop platform its loop plan leaves
+    // from (on double track, the one on the line toward its second stop).
+    const startPlatforms = [];
     for (let i = 0; i < this.roster.length; i++) {
       const plan = this.roster[i];
       const problem = Game.orderProblem(plan);
@@ -606,10 +734,11 @@ export class Game {
         this._showStatus(`Train ${i + 1} ${problem}`);
         return;
       }
-      const stopPlatforms = plan.orders.map((town) => town.station.platforms[0]);
-      const unroutable = this.network.firstUnroutableStop(stopPlatforms);
+      const loop = this.network.planLoop(plan.orders.map((town) => town.station.platforms));
+      const unroutable = loop.unroutable;
+      startPlatforms.push(loop.start);
       if (unroutable !== -1) {
-        this._showStatus(`Train ${i + 1}: no track route to stop ${unroutable + 1} — connect it to the other stops`);
+        this._showStatus(`Train ${i + 1}: no track route to stop ${unroutable + 1} — connect it to the other stops, and check one-way signals (a train can only turn back at a stop on two-way track)`);
         return;
       }
       // Each train parks at its first stop's platform, so first stops must
@@ -629,14 +758,12 @@ export class Game {
     this.money -= totalCost;
     this.fleetCostPaid = totalCost;
     this.state = GameState.SIMULATING;
-    this.editingOrders = false;
-    this.placingStation = false;
-    this.placingSignal = false;
+    this._clearModes();
     this.deadlockedTrains = [];
     this._deadlockTimer = 0.0;
     this._allBlockedTime = 0.0;
     this.trains = [];
-    for (const plan of this.roster) {
+    for (const [i, plan] of this.roster.entries()) {
       const tr = new Train();
       tr.carCount = plan.carCount;
       tr.orders = plan.orders.slice();
@@ -644,7 +771,7 @@ export class Game {
       this.trains.push(tr);
       // The train starts parked at its first stop's platform, as if it had
       // just finished a stop there — same anchoring as a departure.
-      const startPlatform = plan.orders[0].station.platforms[0];
+      const startPlatform = startPlatforms[i];
       this._dispatchToNextOrder(tr, startPlatform.segment.nodeEnd, startPlatform.segment);
       if (this.state !== GameState.SIMULATING) return;
       if (tr.hasRoute()) {
@@ -674,8 +801,13 @@ export class Game {
       return;
     }
     tr.network = this.network;
-    tr.targetPlatform = target.station.platforms[0];
-    const route = this.network.findRouteToPlatform(fromNode, tr.targetPlatform, tr, arriving, true);
+    // Only platforms the train can leave towards the stop after this one.
+    const after = tr.orders[(tr.currentOrderIndex + 1) % tr.orders.length];
+    tr.targetPlatforms = after.station !== null
+      ? this.network.viablePlatforms(target.station.platforms, after.station.platforms)
+      : target.station.platforms;
+    const found = this.network.findRouteToStation(fromNode, tr.targetPlatforms, tr, arriving, true);
+    const route = found !== null ? found.route : [];
     if (route.length > 0) {
       tr.setRoute(route);
       // The route ends with the platform traversal — halt the head so the
@@ -836,39 +968,33 @@ export class Game {
     return null;
   }
 
-  // The hint line for the current mode.
+  // A short tip for the active tool (the toolbar shows the tools and their
+  // shortcuts; this says what clicking does right now). A rejected track
+  // finish leads with the reason.
   hintText() {
-    if (this.state === GameState.SIMULATING) {
-      return `Money: ${Math.trunc(this.money)} | ESC to stop and edit | R to reset | V to toggle reservations`;
-    }
+    if (this.state === GameState.SIMULATING) return 'Running — press Stop (Esc) to edit the network';
     if (this.editingOrders) {
-      let hint = `ORDERS (Train ${this.selectedTrain + 1}): Click towns with stations to append stops (repeats allowed) | RIGHT-CLICK to remove last | , . to switch train | U to undo | ESC/O to finish`;
-      if (this.readyToStart()) hint += ' | SPACE to start simulation';
-      return hint;
+      return `Orders for train ${this.selectedTrain + 1}: click stations to add stops (repeats allowed) · right-click removes the last · Esc when done`;
     }
-    if (this.placingStation) return "STATION: Click a track inside a town's circle | ESC/P to cancel";
-    if (this.placingSignal) {
-      return 'SIGNALS: Click a track to place | Click a signal to cycle two-way > loose one-way > strict one-way > remove | ESC/S to finish';
-    }
+    if (this.placingStation) return "Click a track inside a town's circle to build its station";
+    if (this.placingSignal) return 'Click a track to place a signal · click a signal to cycle two-way › loose one-way › strict one-way › off';
+    if (this.placingTown) return 'Click open ground to place a town';
+    if (this.placingCrossover) return 'Click double track to add a scissors crossover — trains can then turn back at stations either side, and use either platform';
+    if (this.deleting) return 'Click a track to remove it, or a town to remove it and its station';
+    const kind = this.editor.doubleTrack ? 'double track' : 'track';
     if (this.editor.drawing) {
-      let hint = 'Click to add curve points | Click junction/track to finish | SHIFT+Click to finish at a new junction | ESC to cancel | Z to undo';
+      let hint = `Drawing ${kind}: click to add bends · click a junction or track to finish · Shift+click to finish and keep going · Esc cancels · Z removes the last bend`;
       if (this.editor.lastFinishRejected) {
-        hint = (this.editor.rejectionReason === 'turnout'
-          ? 'TURNOUT ANGLE TOO STEEP — approach at a shallower angle | '
-          : 'CURVE TOO TIGHT — add waypoints for a gentler bend | ') + hint;
+        const reasons = {
+          turnout: 'Turnout angle too steep — approach at a shallower angle',
+          double_short: 'Too short for double track — draw further',
+          crossing: 'Crossing too shallow — cross more squarely',
+          crossing_platform: 'Tracks cannot cross a platform',
+        };
+        hint = `${reasons[this.editor.rejectionReason] ?? 'Curve too tight — add bends for a gentler curve'} · ${hint}`;
       }
       return hint;
     }
-    let hint = 'SHIFT+CLICK to place towns | CLICK to draw tracks | P to place station | S to place signals | RIGHT-CLICK to delete | U to undo | O to edit orders | R to reset';
-    if (this.readyToStart()) hint += ' | SPACE to start';
-    return hint;
-  }
-
-  // One-line roster readout (shown in the selected train's colour), or ''
-  // when it should not be shown.
-  rosterLine() {
-    if (this.state !== GameState.EDITING) return '';
-    if (this.placingStation || this.placingSignal || (this.editor.drawing && !this.editingOrders)) return '';
-    return `Train ${this.selectedTrain + 1}/${this.roster.length} — cars: ${this.carCount}, stops: ${this.trainOrders.length} | T to buy | , . to select | X to sell | [ ] cars`;
+    return `Click a junction, a track, or open ground to start drawing ${kind}`;
   }
 }

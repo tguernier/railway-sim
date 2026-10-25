@@ -15,6 +15,9 @@ const suites = [
   './test_undo.js',
   './test_main_input.js',
   './test_orders.js',
+  './test_double_track.js',
+  './test_tools.js',
+  './test_crossovers.js',
 ];
 
 for (const path of suites) {

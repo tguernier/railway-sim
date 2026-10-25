@@ -1,6 +1,6 @@
 import { angleDifference, erase } from './vec2.js';
 import { TrackSegment } from './track_segment.js';
-import { TrackCrossing } from './track_crossing.js';
+import { TrackCrossing, CrossingKind } from './track_crossing.js';
 
 // How a one-way signal facing the other way affects entry into a directed
 // segment. See oneWayAgainst.
@@ -104,8 +104,8 @@ export class TrackNetwork {
   // Record a crossing between two tracks, on the network and on all four
   // directed segments involved. `knownAngle` skips the tangent lookup when
   // the caller already has it (cloning a snapshot of identical geometry).
-  registerCrossing(a, b, point, knownAngle = -1) {
-    const crossing = new TrackCrossing();
+  registerCrossing(a, b, point, knownAngle = -1, kind = CrossingKind.DIAMOND) {
+    const crossing = new TrackCrossing(kind);
     crossing.position = point;
     crossing.angle = knownAngle >= 0 ? knownAngle : TrackSegment.crossingAngle(a, b, point);
     crossing.trackA = a;
@@ -207,21 +207,90 @@ export class TrackNetwork {
     return routeB;
   }
 
-  // Check that a loop of station platforms is fully connected, mirroring how
-  // dispatch routes the train. Returns the index of the first platform that
-  // cannot be reached from the stop before it, or -1 if the whole loop is
-  // routable. Reservation-blind, so layouts are never rejected because of
-  // where trains happen to stand.
-  firstUnroutableStop(platforms) {
-    if (platforms.length === 0) return -1;
-    let arriving = platforms[0].segment;
-    for (let i = 1; i < platforms.length + 1; i++) {
-      const idx = i % platforms.length;
-      const route = this.findRouteToPlatform(arriving.nodeEnd, platforms[idx], null, arriving, true);
-      if (route.length === 0) return idx;
-      arriving = route[route.length - 1];
+  // The cheapest route to any of a station's platforms (a station on double
+  // track has one per track), or null when none is reachable. Each candidate
+  // is found by findRouteToPlatform and compared by routeCost, so with
+  // forTrain the platform choice is traffic-aware; ties go to the earlier
+  // platform. Returns { route, platform }.
+  findRouteToStation(from, platforms, forTrain = null, arriving = null, allowReversal = false) {
+    let best = null;
+    let bestCost = Infinity;
+    for (const platform of platforms) {
+      const route = this.findRouteToPlatform(from, platform, forTrain, arriving, allowReversal);
+      if (route.length === 0) continue;
+      const cost = this.routeCost(route, forTrain);
+      if (cost < bestCost) {
+        best = { route, platform };
+        bestCost = cost;
+      }
+    }
+    return best;
+  }
+
+  // The platforms of a station worth stopping at given where the train goes
+  // next: those from which some platform of the next stop is reachable
+  // (standing at a stop, a train may leave either way). With crossovers a
+  // train can often reach a platform it could not leave in the right
+  // direction — on double track, the other line's platform — and picking
+  // it for being cheapest would strand the train at its next dispatch.
+  // Reservation-blind. Falls back to all platforms when none qualifies, so
+  // loop validation still reports the leg that fails.
+  viablePlatforms(platforms, nextPlatforms) {
+    if (platforms.length < 2) return platforms;
+    const viable = platforms.filter((p) => p.segment.length() > 0
+      && this.findRouteToStation(p.segment.nodeEnd, nextPlatforms, null, p.segment, true) !== null);
+    return viable.length > 0 ? viable : platforms;
+  }
+
+  // Plan a loop of stops the way dispatch will run it: start standing on a
+  // platform of the first stop, route to each subsequent stop's cheapest
+  // reachable platform in turn, and finish back at the first stop. Each stop
+  // is a Platform or an array of them (a station's platforms). The start
+  // platform matters on double track — a train can only leave along its own
+  // running line — so each of the first stop's platforms is tried in turn.
+  // Returns { unroutable, start }: unroutable is -1 when the whole loop works
+  // (start is then the platform to spawn on), else the index of the first
+  // stop that cannot be reached (from the first start platform's attempt).
+  // Reservation-blind, so layouts are never rejected because of where trains
+  // happen to stand.
+  planLoop(stops) {
+    const stations = stops.map((s) => (Array.isArray(s) ? s : [s]));
+    if (stations.length === 0) return { unroutable: -1, start: null };
+    let firstFailure = -1;
+    for (const start of stations[0]) {
+      const failed = this._loopFailure(stations, start);
+      if (failed === -1) return { unroutable: -1, start };
+      if (firstFailure === -1) firstFailure = failed;
+    }
+    return { unroutable: firstFailure, start: null };
+  }
+
+  // Index of the first stop the loop cannot reach starting on `start`, or -1.
+  // Dispatch picks each stop's platform greedily, so a lap can end on a
+  // different platform of the first stop than it began on — on double track,
+  // a train sets out eastbound and returns on the westbound platform — and
+  // the next lap must work from there too. Laps are walked until one starts
+  // from a platform already started from; each lap is deterministic given
+  // its start, so the walk then repeats forever.
+  _loopFailure(stations, start) {
+    const startedFrom = new Set();
+    let arriving = start.segment;
+    while (!startedFrom.has(arriving.platform)) {
+      startedFrom.add(arriving.platform);
+      for (let i = 1; i < stations.length + 1; i++) {
+        const idx = i % stations.length;
+        const targets = this.viablePlatforms(stations[idx], stations[(idx + 1) % stations.length]);
+        const found = this.findRouteToStation(arriving.nodeEnd, targets, null, arriving, true);
+        if (found === null) return idx;
+        arriving = found.route[found.route.length - 1];
+      }
     }
     return -1;
+  }
+
+  // Index of the first stop a loop cannot reach, or -1 (see planLoop).
+  firstUnroutableStop(stops) {
+    return this.planLoop(stops).unroutable;
   }
 
   // Cost of a route for a train: total length, plus BLOCKED_PENALTY for each

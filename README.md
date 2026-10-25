@@ -17,3 +17,4 @@ python3 -m http.server 8000
 - Passenger generation (basic)
 - Track segment occupancy detection / track reservations with crossover detection
 - Path based signalling with two-way / strict one way / loose one way signals
+- Double track
